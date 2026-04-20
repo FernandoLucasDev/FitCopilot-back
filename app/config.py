@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 def _sqlite_fallback() -> str:
@@ -40,6 +40,8 @@ class Settings:
         self.CORS_ORIGINS = [item.strip() for item in origins.split(",") if item.strip()]
 
 
+@dataclass
 class TestSettings(Settings):
     SQLALCHEMY_DATABASE_URI: str = "sqlite+pysqlite:///:memory:"
     TESTING: bool = True
+    CORS_ORIGINS: list[str] = field(default_factory=lambda: ["http://localhost", "http://127.0.0.1"])
