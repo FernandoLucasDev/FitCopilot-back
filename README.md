@@ -1,108 +1,142 @@
 # FitCopilot Back
 
-Backend do FitCopilot em Flask, estruturado por dominio para atender o workspace operacional do profissional, o painel agregado do aluno, billing integrado ao CORE e o portal simples do aluno com OTP local.
+Backend Flask do FitCopilot.
+
+Documentacao canonicamente consolidada:
+
+- [README da raiz](/D:/Projects/DreamCore%20Lab/FC/README.md)
+
+Este diretorio contem o dominio principal do produto:
+
+- auth do profissional integrada ao CORE
+- billing/plans/payments no padrao do `praxis-back`
+- cadastro e painel de alunos
+- OTP local do aluno
+- fichas e sessoes de treino
+- uploads, arquivos e relatorios
+- jobs assincronos
+- IA com Gemini e fallback local
+- integracao de suporte ao WhatsApp
 
 ## Stack
 
 - Python 3.12
 - Flask
 - SQLAlchemy
-- PostgreSQL
-- Redis
 - Celery
+- Redis
 - pytest
+- google-genai
+- boto3
+- pypdf
 
 ## Modulos principais
 
-- `app/auth`: autenticacao profissional e sessao local
-- `app/accounts`: conta profissional e perfis
-- `app/students`: carteira, painel agregado, contexto e portal do aluno
-- `app/workouts`: fichas e ativacao de plano
-- `app/files`: upload, metadata e fluxo de extracao
-- `app/insights`: insights acionaveis
-- `app/messaging`: mensagens sugeridas
-- `app/reports`: solicitacao e consulta de relatorios
-- `app/billing`: planos, assinatura, checkout e portal no padrao CORE
-- `app/integrations`: clientes para CORE, email e adaptadores externos
-- `app/ai`: provider fake e base para provider local
-- `app/jobs`: tarefas assincronas
+- `app/auth`
+- `app/students`
+- `app/workouts`
+- `app/files`
+- `app/reports`
+- `app/insights`
+- `app/messaging`
+- `app/billing`
+- `app/ai`
+- `app/jobs`
+- `app/whatsapp`
+- `app/common`
+- `app/integrations`
 
-## Setup local rapido
+## Variaveis importantes
 
-1. Crie e ative a virtualenv.
-2. Instale dependencias com `pip install -r requirements.txt`.
-3. Ajuste variaveis em `.env` a partir de `.env.example`.
-4. Rode o seed com `python scripts/bootstrap_dev.py`.
-5. Suba a API com `python run.py`.
+Configuradas em `back/.env`:
 
-Credenciais seed:
+- `DATABASE_URL`
+- `REDIS_URL`
+- `AI_PROVIDER`
+- `GEMINI_API_KEY` ou `GEMINI_API_KEY_FILE`
+- `STORAGE_PROVIDER`
+- `B2_ENDPOINT`
+- `B2_BUCKET`
+- `B2_KEY_ID`
+- `B2_APP_KEY`
+- `APP_ID`
+- `APP_SLUG`
+- `BOT_INTERNAL_SECRET`
 
-- profissional: `owner@fitcopilot.dev`
+## Endpoints principais
+
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+- `GET /api/v1/auth/me`
+- `GET /api/v1/workspace/overview`
+- `GET /api/v1/students`
+- `POST /api/v1/students`
+- `GET /api/v1/students/{id}/panel`
+- `POST /api/v1/workouts`
+- `POST /api/v1/students/{id}/assign-workout`
+- `POST /api/v1/student-auth/request-otp`
+- `POST /api/v1/student-auth/verify-otp`
+- `POST /api/v1/internal/bot/whatsapp/respond`
+
+## Comandos uteis
+
+Instalacao:
+
+```bash
+pip install -r requirements.txt
+```
+
+API local:
+
+```bash
+python run.py
+```
+
+Ou:
+
+```bash
+flask --app app:create_app run --host 127.0.0.1 --port 5050
+```
+
+Testes:
+
+```bash
+python -m pytest tests -q
+```
+
+Configurar bucket B2:
+
+```bash
+python scripts/configure_b2_bucket.py
+```
+
+## Credenciais de desenvolvimento
+
+Instrutor:
+
+- email: `owner@fitcopilot.dev`
 - senha: `abcd1234`
-- aluno portal: `joao@fitcopilot.dev`
 
-## Testes
+Aluno enriquecido para validacao:
 
-- integracao backend: `python -m pytest tests -q`
+- email: `fernando@fitcopilot.dev`
 
-## Docker
+## Estado atual
 
-### Backend isolado
+Ja esta funcionando:
 
-```bash
-docker build -t fitcopilot-back .
-docker run --rm -p 5050:5050 --env-file .env fitcopilot-back
-```
+- auth do profissional
+- fluxo de aluno por OTP
+- ficha de treino estruturada
+- sessoes de treino
+- upload e resumo de PDF
+- B2 real
+- Gemini real
+- ponte interna para o bot WhatsApp
 
-### Stack completa
+## Proximos passos
 
-Na raiz `FC/` existe um `docker-compose.yml` que sobe:
-
-- `postgres`
-- `redis`
-- `back`
-- `front`
-
-Suba com:
-
-```bash
-docker compose up --build
-```
-
-URLs:
-
-- frontend: `http://localhost:3000`
-- backend: `http://localhost:5050`
-
-## Jobs
-
-Os jobs estao preparados em `app/jobs/tasks.py` para:
-
-- extracao de arquivo do aluno
-- resumo diario do aluno
-- geracao de relatorio
-- recomputacao de score
-- sugestao de mensagem
-
-No ambiente atual o bootstrap e os testes usam execucao simples e provider fake para manter o fluxo funcional.
-
-## CORE
-
-Configuracoes importantes:
-
-- `CORE_API_URL`
-- `APP_ID=3`
-- `APP_SLUG=fit-copilot`
-
-O backend esta preparado para:
-
-- auth profissional integrada ao CORE
-- billing/plans/payments no padrao do `praxis-back`
-- envio de OTP do aluno via servico de comunicacao do CORE
-- sessao do aluno emitida localmente pelo FitCopilot
-
-## Observacoes
-
-- O projeto hoje usa `db.create_all()` no bootstrap para ambiente dev.
-- As migrations ainda precisam ser consolidadas para fluxo formal de deploy.
-- O provider de IA atual e fake/local-first, pronto para plug com modelos locais e chave API.
+- retries mais fortes para jobs de IA
+- worker dedicado no fluxo local
+- mais observabilidade
+- migracoes e hardening de producao

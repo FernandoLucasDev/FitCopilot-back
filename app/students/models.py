@@ -48,6 +48,8 @@ class StudentProfile(UUIDPrimaryKeyMixin, TimestampMixin, db.Model):
     daily_signals = relationship("StudentDailySignal", back_populates="student")
     interactions = relationship("StudentInteraction", back_populates="student")
     workouts = relationship("WorkoutPlan", back_populates="student")
+    workout_assignments = relationship("StudentWorkout", back_populates="student")
+    workout_sessions = relationship("WorkoutSession", back_populates="student")
     reports = relationship("GeneratedReport", back_populates="student")
 
 

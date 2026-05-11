@@ -21,6 +21,16 @@ class DailySummaryResult:
     risk_level: str
 
 
+@dataclass
+class MealAnalysisResult:
+    estimated_calories: int | None
+    protein_grams: int | None
+    carbs_grams: int | None
+    fats_grams: int | None
+    summary_text: str
+    guidance_text: str
+
+
 class AIProvider:
     def summarize_file(self, *, filename: str, content: bytes, context: dict) -> FileSummaryResult:
         raise NotImplementedError
@@ -32,4 +42,10 @@ class AIProvider:
         raise NotImplementedError
 
     def summarize_student_progress(self, *, context: dict) -> str:
+        raise NotImplementedError
+
+    def analyze_meal(self, *, context: dict) -> MealAnalysisResult:
+        raise NotImplementedError
+
+    def generate_workout_insight(self, *, context: dict) -> str:
         raise NotImplementedError

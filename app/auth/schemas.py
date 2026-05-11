@@ -18,3 +18,13 @@ class RegisterInput(ApiSchema):
 class LoginInput(ApiSchema):
     email: EmailStr
     password: str = Field(min_length=6, max_length=128)
+
+
+class PasswordResetRequestInput(ApiSchema):
+    email: EmailStr
+
+
+class PasswordResetVerifyInput(ApiSchema):
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6)
+    new_password: str = Field(min_length=6, max_length=128)

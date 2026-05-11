@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import mimetypes
+from io import BytesIO
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, send_from_directory
+from flask import Flask, send_file
 
-from app.ai.fake_provider import FakeAIProvider
 from app.common.api import register_error_handlers
-from app.common.storage.local import LocalStorageProvider
 from app.config import Settings, TestSettings
 from app.extensions import celery_app, cors, db, jwt, migrate
 
@@ -25,8 +25,35 @@ def create_app(config_object: type[Settings] | None = None) -> Flask:
     jwt.init_app(app)
     cors.init_app(app, resources={r"/api/*": {"origins": settings.CORS_ORIGINS}})
 
-    storage = LocalStorageProvider(settings.STORAGE_LOCAL_ROOT, settings.STORAGE_PUBLIC_BASE_URL)
-    ai_provider = FakeAIProvider()
+    if settings.STORAGE_PROVIDER == "b2":
+        from app.common.storage.b2 import B2StorageProvider
+
+        storage = B2StorageProvider(
+            endpoint_url=settings.B2_ENDPOINT,
+            region_name=settings.B2_REGION,
+            bucket_name=settings.B2_BUCKET,
+            key_id=settings.B2_KEY_ID or "",
+            app_key=settings.B2_APP_KEY or "",
+            public_base_url=settings.STORAGE_PUBLIC_BASE_URL,
+            key_prefix=settings.B2_KEY_PREFIX,
+        )
+    else:
+        from app.common.storage.local import LocalStorageProvider
+
+        storage = LocalStorageProvider(settings.STORAGE_LOCAL_ROOT, settings.STORAGE_PUBLIC_BASE_URL)
+
+    if settings.AI_PROVIDER == "gemini":
+        from app.ai.gemini_provider import GeminiAIProvider
+
+        ai_provider = GeminiAIProvider(
+            api_key=settings.GEMINI_API_KEY,
+            fast_model=settings.GEMINI_MODEL_FAST,
+            smart_model=settings.GEMINI_MODEL_SMART,
+        )
+    else:
+        from app.ai.fake_provider import FakeAIProvider
+
+        ai_provider = FakeAIProvider()
 
     app.extensions["storage_provider"] = storage
     app.extensions["ai_provider"] = ai_provider
@@ -37,9 +64,10 @@ def create_app(config_object: type[Settings] | None = None) -> Flask:
 
     @app.get("/api/v1/system/storage/<path:storage_key>")
     def serve_local_storage(storage_key: str):
-        root = Path(settings.STORAGE_LOCAL_ROOT)
-        file_path = root / storage_key
-        return send_from_directory(file_path.parent, file_path.name, as_attachment=False)
+        content = storage.open_bytes(storage_key)
+        mimetype = mimetypes.guess_type(storage_key)[0] or "application/octet-stream"
+        filename = Path(storage_key).name
+        return send_file(BytesIO(content), mimetype=mimetype, download_name=filename, as_attachment=False)
 
     return app
 
@@ -60,7 +88,9 @@ def register_blueprints(app: Flask) -> None:
     from app.students.routes import students_bp
     from app.students.portal_routes import student_portal_bp
     from app.system.routes import system_bp
+    from app.whatsapp.routes import whatsapp_bp
     from app.workouts.routes import workouts_bp
+    from app.referral.routes import referral_bp
 
     for blueprint in [
         auth_bp,
@@ -73,8 +103,10 @@ def register_blueprints(app: Flask) -> None:
         insights_bp,
         messaging_bp,
         reports_bp,
+        whatsapp_bp,
         ai_bp,
         system_bp,
+        referral_bp,
     ]:
         app.register_blueprint(blueprint, url_prefix="/api/v1")
 

@@ -30,9 +30,30 @@ class CreateWorkoutPlanInput(ApiSchema):
     valid_from: date | None = None
     valid_until: date | None = None
     days: list[WorkoutDayInput]
+    student_id: str | None = None
 
 
 class UpdateWorkoutPlanInput(ApiSchema):
     title: str | None = None
     objective: str | None = None
     notes: str | None = None
+
+
+class AssignWorkoutInput(ApiSchema):
+    plan_id: str
+
+
+class ExerciseLogInput(ApiSchema):
+    exercise_name: str = Field(min_length=1, max_length=160)
+    sets_completed: int | None = None
+    reps_completed: str | None = None
+    notes: str | None = None
+
+
+class CreateWorkoutSessionInput(ApiSchema):
+    student_id: str
+    plan_id: str
+    date: date
+    status: str = Field(pattern="^(pending|completed|skipped)$")
+    notes: str | None = None
+    exercises: list[ExerciseLogInput] = Field(default_factory=list)

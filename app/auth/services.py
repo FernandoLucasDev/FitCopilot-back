@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import hashlib
+import random
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 
 from flask_jwt_extended import create_access_token
@@ -8,15 +10,25 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from app.accounts.models import Account, ProfessionalProfile
 from app.auth.core_auth_service import core_auth_service
-from app.auth.models import User
+from app.auth.models import ProfessionalPasswordResetChallenge, User
 from app.common.api import ApiError
+from app.common.utils.time import ensure_aware
 from app.common.utils.text import slugify
 from app.extensions import db
+from app.integrations.core_email import core_email_gateway
 from app.jobs.services import create_audit_log
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _hash_code(code: str) -> str:
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def _generate_code() -> str:
+    return f"{random.randint(0, 999999):06d}"
 
 
 def register_account_and_owner(data) -> tuple[User, str]:
@@ -110,6 +122,68 @@ def authenticate(email: str, password: str) -> tuple[User, str]:
     return user, issue_token(user)
 
 
+def request_professional_password_reset(*, email: str, requested_by_ip: str | None = None) -> dict:
+    user = User.query.filter(User.email == email, User.deleted_at.is_(None), User.role.in_(["owner", "professional", "admin"])).first()
+    if user is None:
+        return {"status": "accepted", "expiresInSeconds": 600}
+
+    code = _generate_code()
+    challenge = ProfessionalPasswordResetChallenge(
+        user_id=user.id,
+        email=email,
+        otp_code_hash=_hash_code(code),
+        delivery_status="pending",
+        expires_at=utcnow() + timedelta(minutes=10),
+        requested_by_ip=requested_by_ip,
+    )
+    db.session.add(challenge)
+    db.session.flush()
+
+    if user.core_access_token:
+        try:
+            core_email_gateway.send_html_email(
+                access_token=user.core_access_token,
+                to_email=email,
+                subject="Código para redefinir sua senha FitCopilot",
+                html_content=_build_professional_reset_html(user.full_name, code),
+            )
+            challenge.delivery_status = "sent"
+        except Exception:
+            challenge.delivery_status = "failed"
+    else:
+        challenge.delivery_status = "debug"
+    db.session.commit()
+    return {"status": "accepted", "expiresInSeconds": 600, "debugCode": code if challenge.delivery_status != "sent" else None}
+
+
+def verify_professional_password_reset(*, email: str, code: str, new_password: str) -> dict:
+    user = User.query.filter(User.email == email, User.deleted_at.is_(None), User.role.in_(["owner", "professional", "admin"])).first()
+    if user is None:
+        raise ApiError("Código inválido ou expirado", HTTPStatus.UNAUTHORIZED)
+
+    challenge = (
+        ProfessionalPasswordResetChallenge.query.filter_by(email=email, consumed_at=None)
+        .order_by(ProfessionalPasswordResetChallenge.created_at.desc())
+        .first()
+    )
+    if challenge is None or ensure_aware(challenge.expires_at) < utcnow() or challenge.otp_code_hash != _hash_code(code):
+        raise ApiError("Código inválido ou expirado", HTTPStatus.UNAUTHORIZED)
+
+    user.password_hash = generate_password_hash(new_password)
+    challenge.verified_at = utcnow()
+    challenge.consumed_at = utcnow()
+    create_audit_log(
+        account_id=user.account_id,
+        actor_user_id=user.id,
+        entity_type="user",
+        entity_id=user.id,
+        action="password_reset",
+        new_values={"email": user.email},
+    )
+    db.session.commit()
+    return {"status": "password_updated"}
+
+
 def issue_token(user: User) -> str:
     return create_access_token(identity=str(user.id), additional_claims={"account_id": str(user.account_id) if user.account_id else None})
 
@@ -148,6 +222,18 @@ def build_auth_payload(user: User, token: str | None = None) -> dict:
             "externalOrgId": account.external_org_id if account else None,
         },
     }
+
+
+def _build_professional_reset_html(full_name: str, code: str) -> str:
+    first_name = (full_name or "profissional").split()[0]
+    return f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;background:#0f172a;color:#e2e8f0;padding:24px;border-radius:16px;">
+      <h2 style="margin:0 0 8px 0;">Redefinição de senha FitCopilot</h2>
+      <p style="margin:0 0 18px 0;">Olá {first_name}, use o código abaixo para criar uma nova senha.</p>
+      <div style="font-size:32px;letter-spacing:8px;font-weight:700;background:#111827;border-radius:12px;padding:16px;text-align:center;">{code}</div>
+      <p style="margin-top:18px;font-size:12px;color:#94a3b8;">Esse código expira em 10 minutos. Se você não pediu isso, ignore este e-mail.</p>
+    </div>
+    """
 
 
 def _extract_external_user_id(payload: dict | None) -> int | None:

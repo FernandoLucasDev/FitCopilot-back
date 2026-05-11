@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
+from secrets import token_urlsafe
 
 from sqlalchemy import desc, select
+from werkzeug.security import generate_password_hash
 
 from app.accounts.models import Account, ProfessionalProfile
+from app.auth.models import User
 from app.common.api import ApiError
 from app.common.utils.time import ensure_aware, relative_time_label
 from app.extensions import db
@@ -38,6 +41,49 @@ def require_student(account_id, student_id) -> StudentProfile:
     if student is None:
         raise ApiError("Aluno não encontrado", HTTPStatus.NOT_FOUND)
     return student
+
+
+def get_student_access_status(student: StudentProfile) -> str:
+    if not student.email:
+        return "no_email"
+    if student.user_id:
+        return "active"
+    return "pending_activation"
+
+
+def ensure_student_portal_user(student: StudentProfile) -> User:
+    if student.user_id:
+        user = User.query.filter_by(id=student.user_id).first()
+        if user is not None:
+            return user
+
+    if not student.email:
+        raise ApiError("Aluno sem e-mail para ativar acesso.", HTTPStatus.CONFLICT)
+
+    existing_user = User.query.filter_by(email=student.email).first()
+    if existing_user is not None:
+        student.user_id = existing_user.id
+        existing_user.is_active = True
+        existing_user.is_email_verified = True
+        if existing_user.account_id is None:
+            existing_user.account_id = student.account_id
+        db.session.flush()
+        return existing_user
+
+    user = User(
+        account_id=student.account_id,
+        role="student",
+        full_name=student.full_name,
+        email=student.email,
+        phone=student.phone,
+        password_hash=generate_password_hash(token_urlsafe(32)),
+        is_active=True,
+        is_email_verified=True,
+    )
+    db.session.add(user)
+    db.session.flush()
+    student.user_id = user.id
+    return user
 
 
 def create_student(*, account_id, professional_id, actor_user_id, data) -> StudentProfile:
@@ -208,6 +254,8 @@ def serialize_student_list_item(student: StudentProfile) -> dict:
         "name": student.full_name,
         "initials": initials,
         "goal": goal,
+        "email": student.email,
+        "portalAccessStatus": get_student_access_status(student),
         "status": status_map.get(score.status, "ok"),
         "lastEvent": student.last_signal_summary or "Sem sinais recentes",
         "lastContact": relative_time_label(student.last_contact_at) or "—",
@@ -251,6 +299,11 @@ def get_latest_summary(student_id) -> StudentDailySummary | None:
 
 
 def get_active_workout(student_id) -> WorkoutPlan | None:
+    from app.workouts.services import get_active_workout_for_student
+
+    assignment_plan = get_active_workout_for_student(student_id)
+    if assignment_plan is not None:
+        return assignment_plan
     return (
         WorkoutPlan.query.filter_by(student_id=student_id, status="active")
         .order_by(desc(WorkoutPlan.updated_at))

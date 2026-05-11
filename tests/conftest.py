@@ -15,6 +15,7 @@ from app import create_test_app
 from app.accounts.models import Account, ProfessionalProfile
 from app.auth.models import User
 from app.extensions import db
+from app.common.security.rate_limit import reset_rate_limits
 from app.files.models import StudentFile
 from app.insights.models import AIInsight
 from app.messaging.models import SuggestedMessage
@@ -39,8 +40,10 @@ def flask_app():
     with application.app_context():
         import app.models  # noqa: F401
 
+        reset_rate_limits()
         db.create_all()
         yield application
+        reset_rate_limits()
         db.session.remove()
         db.drop_all()
 

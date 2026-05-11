@@ -31,3 +31,16 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, db.Model):
     account = relationship("Account", back_populates="users")
     professional_profile = relationship("ProfessionalProfile", back_populates="user", uselist=False)
     student_profile = relationship("StudentProfile", back_populates="user", uselist=False)
+
+
+class ProfessionalPasswordResetChallenge(UUIDPrimaryKeyMixin, TimestampMixin, db.Model):
+    __tablename__ = "professional_password_reset_challenges"
+
+    user_id: Mapped[str] = mapped_column(db.ForeignKey("users.id"), nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    otp_code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    delivery_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_by_ip: Mapped[str | None] = mapped_column(String(64))

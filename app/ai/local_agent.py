@@ -15,6 +15,10 @@ class AgentResult:
 
 class FitCopilotAgent:
     def _resolve_model(self, task_type: str) -> str:
+        if current_app.config.get("AI_PROVIDER") == "gemini":
+            if task_type in {"STUDENT_DAILY_READING", "PROGRESS_REPORT", "FILE_SUMMARY"}:
+                return current_app.config.get("GEMINI_MODEL_SMART", "gemini-2.5-flash")
+            return current_app.config.get("GEMINI_MODEL_FAST", "gemini-2.0-flash")
         if task_type in {"STUDENT_DAILY_READING", "PROGRESS_REPORT", "FILE_SUMMARY"}:
             return current_app.config.get("LOCAL_AI_MODEL_SMART", "fitcopilot-smart")
         return current_app.config.get("LOCAL_AI_MODEL_FAST", "fitcopilot-fast")

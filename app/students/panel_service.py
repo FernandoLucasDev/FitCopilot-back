@@ -3,6 +3,13 @@ from __future__ import annotations
 from app.files.models import StudentFile
 from app.insights.models import AIInsight
 from app.messaging.models import SuggestedMessage
+from app.extensions import db
+from app.operations.services import (
+    build_student_timeline,
+    evaluate_retention_automation,
+    latest_operational_score,
+    recompute_and_persist_score,
+)
 from app.reports.models import GeneratedReport
 from app.students.services import (
     compute_student_score,
@@ -10,13 +17,19 @@ from app.students.services import (
     get_latest_summary,
     get_recent_interactions,
     get_recent_signals,
+    get_student_access_status,
     serialize_student_list_item,
 )
-from app.workouts.services import serialize_workout_plan
+from app.whatsapp.services import list_student_whatsapp_suggestions, list_whatsapp_history, student_whatsapp_status
+from app.workouts.services import list_student_sessions, serialize_workout_plan, summarize_workout_consistency
 
 
 def get_student_panel(student) -> dict:
     score = compute_student_score(student)
+    recompute_and_persist_score(student)
+    operational_score = latest_operational_score(student)
+    automation = evaluate_retention_automation(student)
+    db.session.commit()
     latest_summary = get_latest_summary(student.id)
     workout = get_active_workout(student.id)
     files = (
@@ -45,6 +58,10 @@ def get_student_panel(student) -> dict:
         .limit(5)
         .all()
     )
+    workout_consistency = summarize_workout_consistency(student)
+    sessions = list_student_sessions(account_id=student.account_id, student_id=student.id)[:6]
+    whatsapp_status = student_whatsapp_status(student)
+    whatsapp_history = list_whatsapp_history(student)
 
     suggested_message_text = (
         latest_summary.suggested_message_text
@@ -68,14 +85,18 @@ def get_student_panel(student) -> dict:
             "initials": list_item["initials"],
             "goal": list_item["goal"],
             "status": list_item["status"],
+            "email": student.email,
+            "portalAccessStatus": get_student_access_status(student),
             "lastContact": list_item["lastContact"],
         },
         "score": {
-            "value": score.score,
-            "trend": {"stable": "flat", "up": "up", "down": "down"}.get(score.trend, "flat"),
-            "label": score.insight,
-            "adherence": score.score,
+            "value": operational_score["score"],
+            "trend": {"stable": "flat", "up": "up", "down": "down"}.get(operational_score["trend"], "flat"),
+            "label": operational_score["reason"] or score.insight,
+            "adherence": operational_score["score"],
         },
+        "operationalScore": operational_score,
+        "retentionAutomation": _serialize_automation_decision(automation),
         "smartSummary": {
             "insight": latest_summary.ai_reading_text if latest_summary else score.insight,
             "overall": latest_summary.overall_summary_text if latest_summary else student.last_signal_summary,
@@ -84,22 +105,26 @@ def get_student_panel(student) -> dict:
             "meals": today_meals,
             "lastSignal": student.last_signal_summary or "Sem sinais hoje",
             "plannedWorkout": workout.title if workout else "Sem ficha ativa",
-            "aiReading": latest_summary.ai_reading_text if latest_summary else score.insight,
-            "impact": latest_summary.suggested_adjustment_text if latest_summary else "Manter acompanhamento humano com leitura pragmática.",
+            "aiReading": latest_summary.ai_reading_text if latest_summary else workout_consistency["summary"] if workout else score.insight,
+            "impact": latest_summary.suggested_adjustment_text if latest_summary else _build_workout_action(workout_consistency),
         },
         "suggestionOfDay": {
             "title": insights[0].title if insights else "Fazer follow-up leve",
-            "body": insights[0].body if insights else "Valide como o aluno está e ajuste o plano conforme a resposta.",
+            "body": insights[0].body if insights else "Valide como o aluno esta e ajuste o plano conforme a resposta.",
             "message": suggested_message_text,
         },
         "data": {
             "notes": student.notes,
+            "email": student.email,
+            "portalAccessStatus": get_student_access_status(student),
             "birthDate": student.birth_date.isoformat() if student.birth_date else None,
             "sex": student.sex,
             "heightCm": float(student.height_cm) if student.height_cm is not None else None,
             "currentWeightKg": float(student.current_weight_kg) if student.current_weight_kg is not None else None,
         },
         "workout": serialize_workout_plan(workout),
+        "workoutHistory": sessions,
+        "workoutConsistency": workout_consistency,
         "files": [
             {
                 "id": str(item.id),
@@ -143,6 +168,11 @@ def get_student_panel(student) -> dict:
             }
             for item in reports
         ],
+        "whatsapp": {
+            "status": whatsapp_status,
+            "history": whatsapp_history,
+            "suggestions": list_student_whatsapp_suggestions(student),
+        },
         "history": [
             {
                 "id": str(item.id),
@@ -153,4 +183,28 @@ def get_student_panel(student) -> dict:
             }
             for item in signals
         ],
+        "timeline": build_student_timeline(student),
+    }
+
+
+def _build_workout_action(consistency: dict) -> str:
+    if consistency["skippedCount"] >= 2:
+        return "Queda de consistencia detectada. Vale reduzir friccao e fazer reengajamento hoje."
+    if consistency["completedCount"] >= 3:
+        return "Boa consistencia na semana. Mantenha progressao simples e feedback positivo."
+    return "Acompanhar a proxima sessao e validar se a ficha continua aderente a rotina."
+
+
+def _serialize_automation_decision(decision) -> dict | None:
+    if decision is None:
+        return None
+    return {
+        "id": str(decision.id),
+        "ruleType": decision.rule_type,
+        "status": decision.status,
+        "priority": decision.priority,
+        "reason": decision.reason,
+        "suggestedAction": decision.suggested_action,
+        "suppressedUntil": decision.suppressed_until.isoformat() if decision.suppressed_until else None,
+        "payload": decision.payload_json,
     }

@@ -11,6 +11,8 @@ from app.reports.models import GeneratedReport
 from app.students.models import StudentDailySummary, StudentInteraction, StudentProfile
 from app.students.services import compute_student_score
 from app.insights.models import AIInsight
+from app.whatsapp.models import InboundMessageRecord, OutboundMessageDispatch
+from app.whatsapp.services import perform_dispatch, process_inbound_message, send_daily_checkin, send_manual_whatsapp_message, send_workout_of_day
 
 
 def utcnow() -> datetime:
@@ -19,6 +21,47 @@ def utcnow() -> datetime:
 
 def _find_ledger(reference_type: str, reference_id: str) -> BackgroundJob | None:
     return BackgroundJob.query.filter_by(reference_type=reference_type, reference_id=reference_id).order_by(BackgroundJob.created_at.desc()).first()
+
+
+@celery_app.task(name="send_whatsapp_message_job")
+def send_whatsapp_message_job(dispatch_id: str):
+    dispatch = OutboundMessageDispatch.query.filter_by(id=dispatch_id).first()
+    if dispatch is None:
+        return {"status": "missing"}
+    ledger = _find_ledger("whatsapp_dispatch", dispatch_id)
+    try:
+        perform_dispatch(dispatch_id)
+        if ledger:
+            finish_background_job(ledger, status="completed", result={"dispatch_id": dispatch_id})
+        db.session.commit()
+        return {"status": "completed"}
+    except Exception as exc:  # pragma: no cover
+        if dispatch:
+            dispatch.local_status = "failed"
+        if ledger:
+            finish_background_job(ledger, status="failed", error_message=str(exc))
+        db.session.commit()
+        raise
+
+
+@celery_app.task(name="process_inbound_whatsapp_message_job")
+def process_inbound_whatsapp_message_job(inbound_message_record_id: str):
+    inbound = InboundMessageRecord.query.filter_by(id=inbound_message_record_id).first()
+    if inbound is None:
+        return {"status": "missing"}
+    ledger = _find_ledger("inbound_message_record", inbound_message_record_id)
+    try:
+        result = process_inbound_message(inbound_message_record_id)
+        if ledger:
+            finish_background_job(ledger, status="completed", result=result)
+        db.session.commit()
+        return result
+    except Exception as exc:  # pragma: no cover
+        inbound.processing_status = "failed"
+        if ledger:
+            finish_background_job(ledger, status="failed", error_message=str(exc))
+        db.session.commit()
+        raise
 
 
 @celery_app.task(name="extract_student_file_job")
@@ -95,12 +138,37 @@ def generate_student_daily_summary_job(student_id: str, summary_date: str | None
         for item in student.interactions
         if item.interaction_at.date() == target_date
     ]
+    recent_files = [
+        {
+            "title": item.title,
+            "category": item.file_category,
+            "summary": item.ai_summary,
+            "structured_data": item.extracted_structured_json,
+        }
+        for item in student.files
+        if item.extraction_status == "completed"
+    ][:3]
+    recent_sessions = [
+        {
+            "date": item.session_date.isoformat(),
+            "status": item.status,
+            "notes": item.notes,
+        }
+        for item in sorted(student.workout_sessions, key=lambda value: value.session_date, reverse=True)[:5]
+    ]
     from flask import current_app
 
     ai_provider = current_app.extensions["ai_provider"]
     score = compute_student_score(student)
     result = ai_provider.summarize_student_day(
-        context={"student_name": student.full_name, "signals": signals, "interactions": interactions, "score": score.score}
+        context={
+            "student_name": student.full_name,
+            "signals": signals,
+            "interactions": interactions,
+            "score": score.score,
+            "recent_files": recent_files,
+            "recent_workout_sessions": recent_sessions,
+        }
     )
     summary.food_summary_text = result.food_summary_text
     summary.activity_summary_text = result.activity_summary_text
@@ -151,7 +219,44 @@ def generate_student_report_job(report_id: str):
     report.status = "processing"
     student = report.student
     ai_provider = current_app.extensions["ai_provider"]
-    report.summary_text = ai_provider.summarize_student_progress(context={"student_name": student.full_name})
+    recent_files = [
+        {
+            "title": item.title,
+            "category": item.file_category,
+            "summary": item.ai_summary,
+            "structured_data": item.extracted_structured_json,
+        }
+        for item in student.files
+        if item.extraction_status == "completed"
+    ][:5]
+    workout_sessions = [
+        {
+            "date": item.session_date.isoformat(),
+            "status": item.status,
+            "notes": item.notes,
+            "exercises": [
+                {
+                    "exercise_name": log.exercise_name,
+                    "sets_completed": log.sets_completed,
+                    "reps_completed": log.reps_completed,
+                }
+                for log in item.exercise_logs
+            ],
+        }
+        for item in sorted(student.workout_sessions, key=lambda value: value.session_date, reverse=True)[:10]
+    ]
+    report.summary_text = ai_provider.summarize_student_progress(
+        context={
+            "student_name": student.full_name,
+            "goal": student.main_objective_text,
+            "status": student.status,
+            "adherence_score": student.adherence_score,
+            "recent_files": recent_files,
+            "workout_sessions": workout_sessions,
+            "period_start": report.period_start.isoformat() if report.period_start else None,
+            "period_end": report.period_end.isoformat() if report.period_end else None,
+        }
+    )
     storage = current_app.extensions["storage_provider"]
     content = report.summary_text.encode("utf-8")
     stored = storage.save(f"accounts/{report.account_id}/reports", f"{report.report_type}.txt", content, "text/plain")
@@ -197,3 +302,38 @@ def generate_message_suggestion_job(student_id: str):
     db.session.add(message)
     db.session.commit()
     return {"status": "completed", "message_id": str(message.id)}
+
+
+@celery_app.task(name="send_daily_checkin_job")
+def send_daily_checkin_job(student_id: str):
+    student = StudentProfile.query.filter_by(id=student_id).first()
+    if student is None:
+        return {"status": "missing"}
+    dispatch = send_daily_checkin(student=student, actor_user_id=student.primary_professional.user_id if student.primary_professional else None)
+    return {"status": "completed", "dispatch_id": str(dispatch.id)}
+
+
+@celery_app.task(name="send_workout_of_day_job")
+def send_workout_of_day_job(student_id: str, workout_plan_id: str | None = None):
+    student = StudentProfile.query.filter_by(id=student_id).first()
+    if student is None:
+        return {"status": "missing"}
+    dispatch = send_workout_of_day(student=student, actor_user_id=student.primary_professional.user_id if student.primary_professional else None)
+    return {"status": "completed", "dispatch_id": str(dispatch.id), "workout_plan_id": workout_plan_id}
+
+
+@celery_app.task(name="send_reengagement_message_job")
+def send_reengagement_message_job(student_id: str, reason_code: str):
+    student = StudentProfile.query.filter_by(id=student_id).first()
+    if student is None:
+        return {"status": "missing"}
+    text = (
+        f"Oi {student.full_name.split()[0]}, percebi uma queda no seu ritmo ({reason_code}). "
+        "Se fizer sentido, me responde aqui que eu ajusto seu acompanhamento."
+    )
+    dispatch = send_manual_whatsapp_message(
+        student=student,
+        actor_user_id=student.primary_professional.user_id if student.primary_professional else None,
+        message_text=text,
+    )
+    return {"status": "completed", "dispatch_id": str(dispatch.id)}
