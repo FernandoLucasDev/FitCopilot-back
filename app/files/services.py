@@ -17,6 +17,11 @@ ALLOWED_MIME_TYPES = {
     "image/png",
     "image/jpeg",
     "text/plain",
+    "text/csv",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
 

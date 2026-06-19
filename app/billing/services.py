@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from datetime import date
+import logging
 from typing import Any
 
 from flask import current_app
+import requests
 
 from app.integrations.core_client import core_client
+
+
+logger = logging.getLogger(__name__)
 
 
 class BillingGateway:
@@ -83,54 +88,153 @@ class BillingGateway:
         normalized = str(code or "FREE").upper()
         return next((plan for plan in self.LOCAL_PLANS if plan["code"] == normalized), self.LOCAL_PLANS[0])
 
+    def _safe_core_request(self, *, fallback: Any, operation: str, **kwargs) -> Any:
+        try:
+            return core_client.request(**kwargs)
+        except (requests.RequestException, RuntimeError, ValueError) as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            logger.warning("Core billing %s failed status=%s; using local fallback", operation, status)
+            return fallback
+
+    def _local_subscription(self, *, plan_code: str | None = None) -> dict[str, Any]:
+        plan = self._plan_by_code(plan_code)
+        return {
+            "planCode": plan["code"],
+            "planName": plan["name"],
+            "status": "active",
+            "billingCycle": "month",
+            "amount": plan["price"],
+            "currency": "BRL",
+            "nextBillingAt": date.today().isoformat(),
+            "cancelAtPeriodEnd": False,
+            "usage": {"studentsUsed": 0, "aiCreditsUsed": 0, "uploadsUsed": 0, "reportsUsed": 0},
+            "paymentMethod": None,
+            "invoices": [],
+            "source": "local_fallback",
+        }
+
+    def _local_entitlements(self, *, plan_code: str | None = None) -> dict[str, Any]:
+        plan = self._plan_by_code(plan_code)
+        return {
+            "plan_code": plan["code"],
+            "features": {
+                "clients": True,
+                "workouts": True,
+                "automations": plan["code"] in {"PRO", "ELITE", "ACADEMIA"},
+                "whatsapp_auto": plan["code"] in {"PRO", "ELITE", "ACADEMIA"},
+                "ai_advanced": plan["code"] in {"ELITE", "ACADEMIA"},
+                "academy_dashboard": plan["code"] == "ACADEMIA",
+            },
+            "limits": {
+                "clients.active.max_count": plan["limits"]["students"],
+                "ai.calls.monthly_count": plan["limits"]["aiCredits"],
+                "uploads.monthly_count": plan["limits"]["uploads"],
+                "reports.monthly_count": plan["limits"]["reports"],
+            },
+            "usage_scope": "organization",
+            "source": "local_fallback",
+        }
+
     def get_plans(self, *, token: str):
         if not self._enabled():
             return self.LOCAL_PLANS
-        raw = core_client.request(method="GET", path="/billing/plans/", token=token)
+        raw = self._safe_core_request(
+            fallback=self.LOCAL_PLANS,
+            operation="plans",
+            method="GET",
+            path="/billing/plans/",
+            token=token,
+        )
+        if isinstance(raw, dict):
+            raw = raw.get("results") or raw.get("items") or raw.get("data") or self.LOCAL_PLANS
         return [self._normalize_core_plan(item) for item in raw]
 
-    def get_subscription(self, *, token: str, org_id: str | None = None):
+    def get_subscription(self, *, token: str, org_id: str | None = None, plan_code: str | None = None):
+        fallback = self._local_subscription(plan_code=plan_code)
         if not self._enabled():
-            return {
-                "planCode": "FREE",
-                "planName": "Starter",
-                "status": "active",
-                "billingCycle": "month",
-                "amount": 0,
-                "currency": "BRL",
-                "nextBillingAt": date.today().isoformat(),
-                "cancelAtPeriodEnd": False,
-                "usage": {"studentsUsed": 0, "aiCreditsUsed": 0, "uploadsUsed": 0, "reportsUsed": 0},
-                "paymentMethod": None,
-                "invoices": [],
-            }
+            return fallback
+        if not token:
+            return fallback
         if org_id:
-            entitlements = core_client.request(method="GET", path=f"/orgs/{org_id}/entitlements/", token=token, org_id=org_id)
+            entitlements = self._safe_core_request(
+                fallback=self._local_entitlements(plan_code=plan_code),
+                operation="org entitlements for subscription",
+                method="GET",
+                path=f"/orgs/{org_id}/entitlements/",
+                token=token,
+                org_id=org_id,
+            )
             return self._subscription_from_entitlements(entitlements)
-        return core_client.request(method="GET", path="/billing/subscriptions/me/", token=token)
+        return self._safe_core_request(
+            fallback=fallback,
+            operation="subscription",
+            method="GET",
+            path="/billing/subscriptions/me/",
+            token=token,
+        )
 
-    def get_entitlements(self, *, token: str, org_id: str | None = None):
+    def get_entitlements(self, *, token: str, org_id: str | None = None, plan_code: str | None = None):
+        fallback = self._local_entitlements(plan_code=plan_code)
         if not self._enabled():
-            return {
-                "plan_code": "FREE",
-                "features": {"clients": True, "workouts": True, "automations": False, "whatsapp_auto": False},
-                "limits": {"clients.active.max_count": 5, "ai.calls.monthly_count": 100},
-                "usage_scope": "organization",
-            }
+            return fallback
+        if not token:
+            return fallback
         if org_id:
-            return core_client.request(method="GET", path=f"/orgs/{org_id}/entitlements/", token=token, org_id=org_id)
-        return core_client.request(method="GET", path="/billing/entitlements/me/", token=token)
+            return self._safe_core_request(
+                fallback=fallback,
+                operation="org entitlements",
+                method="GET",
+                path=f"/orgs/{org_id}/entitlements/",
+                token=token,
+                org_id=org_id,
+            )
+        return self._safe_core_request(
+            fallback=fallback,
+            operation="entitlements",
+            method="GET",
+            path="/billing/entitlements/me/",
+            token=token,
+        )
 
-    def create_checkout_session(self, *, token: str, plan_code: str, success_url: str, cancel_url: str, org_id: str | None = None):
+    def get_checkout_config(self, *, token: str):
+        if not self._enabled():
+            return {"publishable_key": None, "mode": "mock"}
+        if not token:
+            return {"publishable_key": None, "mode": "unavailable"}
+        return self._safe_core_request(
+            fallback={"publishable_key": None, "mode": "unavailable"},
+            operation="checkout config",
+            method="GET",
+            path="/payments/config/",
+            token=token,
+        )
+
+    def create_checkout_session(
+        self,
+        *,
+        token: str,
+        plan_code: str,
+        success_url: str,
+        cancel_url: str,
+        org_id: str | None = None,
+        presentation: str = "hosted",
+        return_url: str | None = None,
+    ):
         if not self._enabled():
             return {"checkout_url": success_url, "url": success_url, "mode": "mock", "plan_code": plan_code}
         if org_id:
             result = core_client.request(
                 method="POST",
-                path=f"/orgs/{org_id}/plan-switch/",
+                path=f"/orgs/{org_id}/checkout/",
                 token=token,
                 org_id=org_id,
-                json={"plan_code": plan_code, "success_url": success_url, "cancel_url": cancel_url},
+                json={
+                    "plan_code": plan_code,
+                    "success_url": success_url,
+                    "cancel_url": cancel_url,
+                    "presentation": presentation,
+                    "return_url": return_url,
+                },
             )
             if isinstance(result, dict) and result.get("checkout_url") and not result.get("url"):
                 result["url"] = result["checkout_url"]
@@ -139,7 +243,13 @@ class BillingGateway:
             method="POST",
             path="/payments/checkout-session/",
             token=token,
-            json={"plan_id": plan_code, "success_url": success_url, "cancel_url": cancel_url},
+            json={
+                "plan_id": plan_code,
+                "success_url": success_url,
+                "cancel_url": cancel_url,
+                "presentation": presentation,
+                "return_url": return_url,
+            },
         )
         if isinstance(result, dict) and result.get("checkout_url") and not result.get("url"):
             result["url"] = result["checkout_url"]
@@ -158,6 +268,29 @@ class BillingGateway:
             )
         return core_client.request(method="POST", path="/payments/portal-session/", token=token)
 
+    def create_setup_intent(self, *, token: str):
+        if not self._enabled():
+            return {"client_secret": None, "setup_intent_id": None, "mode": "mock"}
+        return core_client.request(method="POST", path="/payments/setup-intent/", token=token)
+
+    def confirm_setup_intent(self, *, token: str, setup_intent_id: str):
+        if not self._enabled():
+            return {
+                "mode": "mock",
+                "payment_method": {
+                    "brand": "visa",
+                    "last4": "4242",
+                    "exp_month": 12,
+                    "exp_year": 2030,
+                },
+            }
+        return core_client.request(
+            method="POST",
+            path="/payments/setup-intent/confirm/",
+            token=token,
+            json={"setup_intent_id": setup_intent_id},
+        )
+
     def _normalize_core_plan(self, item: dict[str, Any]) -> dict[str, Any]:
         code = str(item.get("code") or item.get("slug") or "FREE").upper()
         local = self._plan_by_code(code)
@@ -172,7 +305,7 @@ class BillingGateway:
         }
 
     def _subscription_from_entitlements(self, entitlements: dict[str, Any]) -> dict[str, Any]:
-        plan = self._plan_by_code(entitlements.get("plan_code"))
+        plan = self._plan_by_code(entitlements.get("plan_code") or (entitlements.get("plan") or {}).get("code"))
         usage = entitlements.get("usage") or {}
         return {
             "planCode": plan["code"],

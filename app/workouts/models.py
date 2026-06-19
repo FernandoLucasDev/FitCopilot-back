@@ -51,7 +51,7 @@ class WorkoutDayExercise(UUIDPrimaryKeyMixin, TimestampMixin, db.Model):
     order_index: Mapped[int] = mapped_column(Integer, nullable=False)
     exercise_name: Mapped[str] = mapped_column(String(160), nullable=False)
     sets_count: Mapped[int | None] = mapped_column(Integer)
-    reps_text: Mapped[str | None] = mapped_column(String(60))
+    reps_text: Mapped[str | None] = mapped_column(db.Text())
     rest_seconds: Mapped[int | None] = mapped_column(Integer)
     notes: Mapped[str | None] = mapped_column(db.Text())
 

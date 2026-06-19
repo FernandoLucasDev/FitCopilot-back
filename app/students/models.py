@@ -51,6 +51,7 @@ class StudentProfile(UUIDPrimaryKeyMixin, TimestampMixin, db.Model):
     workout_assignments = relationship("StudentWorkout", back_populates="student")
     workout_sessions = relationship("WorkoutSession", back_populates="student")
     reports = relationship("GeneratedReport", back_populates="student")
+    physical_assessments = relationship("PhysicalAssessment", backref="student")
 
 
 class StudentHealthContext(UUIDPrimaryKeyMixin, TimestampMixin, db.Model):

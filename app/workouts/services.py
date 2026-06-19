@@ -109,11 +109,30 @@ def update_workout_plan(*, plan: WorkoutPlan, actor_user_id, data) -> WorkoutPla
     return plan
 
 
+def archive_workout_plan(*, plan: WorkoutPlan, actor_user_id) -> WorkoutPlan:
+    old_values = {"status": plan.status, "archived_at": plan.archived_at.isoformat() if plan.archived_at else None}
+    plan.status = "archived"
+    plan.archived_at = utcnow()
+    StudentWorkout.query.filter_by(plan_id=plan.id, active=True).update({"active": False})
+    create_audit_log(
+        account_id=plan.account_id,
+        actor_user_id=actor_user_id,
+        entity_type="workout_plan",
+        entity_id=plan.id,
+        action="archived",
+        old_values=old_values,
+        new_values={"status": plan.status, "archived_at": plan.archived_at.isoformat()},
+    )
+    db.session.commit()
+    return plan
+
+
 def activate_workout_plan(*, plan: WorkoutPlan, actor_user_id) -> WorkoutPlan:
+    if plan.archived_at is not None:
+        raise ApiError("Ficha arquivada nao pode ser ativada.", HTTPStatus.CONFLICT)
     active_plan = WorkoutPlan.query.filter_by(student_id=plan.student_id, status="active").first()
     if active_plan and active_plan.id != plan.id:
-        active_plan.status = "archived"
-        active_plan.archived_at = utcnow()
+        active_plan.status = "draft"
     plan.status = "active"
     create_audit_log(
         account_id=plan.account_id,
@@ -130,12 +149,13 @@ def activate_workout_plan(*, plan: WorkoutPlan, actor_user_id) -> WorkoutPlan:
 def assign_workout_to_student(*, account_id, student_id, plan_id, actor_user_id) -> StudentWorkout:
     student = require_student(account_id, student_id)
     plan = require_workout_plan(account_id, plan_id)
+    if plan.archived_at is not None:
+        raise ApiError("Ficha arquivada nao pode ser atribuida ao aluno.", HTTPStatus.CONFLICT)
     current_assignment = get_active_assignment(student.id)
     if current_assignment and current_assignment.plan_id != plan.id:
         current_assignment.active = False
         if current_assignment.plan and current_assignment.plan.status == "active":
-            current_assignment.plan.status = "archived"
-            current_assignment.plan.archived_at = utcnow()
+            current_assignment.plan.status = "draft"
     StudentWorkout.query.filter_by(student_id=student.id, active=True).update({"active": False})
     assignment = StudentWorkout(
         student_id=student.id,
@@ -145,6 +165,7 @@ def assign_workout_to_student(*, account_id, student_id, plan_id, actor_user_id)
         active=True,
     )
     db.session.add(assignment)
+    db.session.flush()
     plan.student_id = student.id
     plan.status = "active"
     student.last_signal_summary = f"Ficha ativa: {plan.title}"
@@ -170,13 +191,27 @@ def get_active_assignment(student_id) -> StudentWorkout | None:
 
 def get_active_workout_for_student(student_id) -> WorkoutPlan | None:
     assignment = get_active_assignment(student_id)
-    if assignment:
+    if assignment and assignment.plan and assignment.plan.archived_at is None:
         return assignment.plan
     return (
-        WorkoutPlan.query.filter_by(student_id=student_id, status="active")
+        WorkoutPlan.query.filter_by(student_id=student_id, status="active", archived_at=None)
         .order_by(WorkoutPlan.updated_at.desc())
         .first()
     )
+
+
+def list_student_workout_plans(*, account_id, student_id) -> list[dict]:
+    require_student(account_id, student_id)
+    plans = (
+        WorkoutPlan.query.filter(
+            WorkoutPlan.account_id == account_id,
+            WorkoutPlan.student_id == student_id,
+            WorkoutPlan.archived_at.is_(None),
+        )
+        .order_by(WorkoutPlan.status.desc(), WorkoutPlan.updated_at.desc())
+        .all()
+    )
+    return [serialize_workout_plan(plan, include_assignment_summary=True) for plan in plans]
 
 
 def create_workout_session(*, account_id, actor_user_id, data) -> WorkoutSession:
@@ -216,6 +251,73 @@ def create_workout_session(*, account_id, actor_user_id, data) -> WorkoutSession
         entity_id=session.id,
         action="created",
         new_values={"student_id": str(student.id), "plan_id": str(plan.id), "status": session.status},
+    )
+    db.session.commit()
+    return session
+
+
+def update_workout_session(*, account_id, actor_user_id, session_id, data) -> WorkoutSession:
+    student = require_student(account_id, data.student_id)
+    plan = require_workout_plan(account_id, data.plan_id)
+    session = WorkoutSession.query.filter_by(id=session_id, student_id=student.id).first()
+    if session is None:
+        raise ApiError("Sessao de treino nao encontrada", HTTPStatus.NOT_FOUND)
+    if session.plan_id != plan.id:
+        raise ApiError("Sessao pertence a outra ficha.", HTTPStatus.CONFLICT)
+
+    old_values = {"status": session.status, "notes": session.notes}
+    session.status = data.status
+    session.notes = data.notes
+    session.session_date = data.date
+    session.exercise_logs.clear()
+    db.session.flush()
+
+    for exercise in data.exercises:
+        db.session.add(
+            ExerciseLog(
+                session_id=session.id,
+                exercise_name=exercise.exercise_name,
+                sets_completed=exercise.sets_completed,
+                reps_completed=exercise.reps_completed,
+                notes=exercise.notes,
+            )
+        )
+
+    student.last_activity_at = utcnow()
+    student.last_signal_summary = _session_signal_summary(plan.title, data.status)
+    _register_session_signal(account_id=account_id, actor_user_id=actor_user_id, student=student, plan=plan, session=session)
+
+    create_audit_log(
+        account_id=account_id,
+        actor_user_id=actor_user_id,
+        entity_type="workout_session",
+        entity_id=session.id,
+        action="updated",
+        old_values=old_values,
+        new_values={"student_id": str(student.id), "plan_id": str(plan.id), "status": session.status},
+    )
+    db.session.commit()
+    return session
+
+
+def complete_workout_session_without_logs(*, session: WorkoutSession, actor_user_id, note: str) -> WorkoutSession:
+    old_values = {"status": session.status, "notes": session.notes}
+    session.status = "completed"
+    session.notes = f"{session.notes or ''}\n{note}".strip()
+    student = session.student
+    plan = session.plan
+    student.last_activity_at = utcnow()
+    student.last_signal_summary = _session_signal_summary(plan.title if plan else "Treino", session.status)
+    if plan:
+        _register_session_signal(account_id=student.account_id, actor_user_id=actor_user_id, student=student, plan=plan, session=session)
+    create_audit_log(
+        account_id=student.account_id,
+        actor_user_id=actor_user_id,
+        entity_type="workout_session",
+        entity_id=session.id,
+        action="auto_completed",
+        old_values=old_values,
+        new_values={"student_id": str(student.id), "plan_id": str(session.plan_id), "status": session.status},
     )
     db.session.commit()
     return session

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from uuid import uuid4
 
+import requests
 from flask import current_app
 
 from app.common.api import ApiError
@@ -22,7 +23,8 @@ from app.whatsapp.models import (
     WhatsAppDeliveryStatusEvent,
     WhatsAppSession,
 )
-from app.workouts.services import get_active_workout_for_student, serialize_workout_plan
+from app.workouts.models import WorkoutSession
+from app.workouts.services import complete_workout_session_without_logs, get_active_workout_for_student, serialize_workout_plan
 
 
 def utcnow() -> datetime:
@@ -128,6 +130,15 @@ def get_or_create_student_automations(student: StudentProfile) -> list[WhatsAppA
             rule_type="reengagement",
             is_active=True,
             schedule_json={"cooldown_days": 2},
+            filters_json={"student_id": str(student.id)},
+            template_config_json={},
+        ),
+        WhatsAppAutomationRule(
+            account_id=student.account_id,
+            name="Fechamento do dia",
+            rule_type="daily_report",
+            is_active=True,
+            schedule_json={"hour": current_app.config.get("WHATSAPP_DAILY_REPORT_HOUR", 20)},
             filters_json={"student_id": str(student.id)},
             template_config_json={},
         ),
@@ -353,13 +364,25 @@ def send_onboarding_message(*, student: StudentProfile, actor_user_id, enqueue: 
     phone = normalize_phone(student.phone)
     if not phone:
         raise ApiError("Aluno sem telefone válido para WhatsApp.", HTTPStatus.CONFLICT)
-    body = (
-        f"Oi, {student.full_name.split()[0]}! 👋 Seu acompanhamento no FitCopilot começou.\n\n"
-        f"{student.primary_professional.user.full_name if student.primary_professional and student.primary_professional.user else 'Seu profissional'} "
-        "vai acompanhar seus treinos, evolução e rotina por aqui.\n"
-        "Quer começar hoje?"
+    professional_name = (
+        student.primary_professional.user.full_name
+        if student.primary_professional and student.primary_professional.user
+        else "seu personal"
     )
-    session = _upsert_session(student=student, flow="onboarding", step="awaiting_confirmation", context={"source": "professional_trigger"})
+    portal_url = str(current_app.config.get("STUDENT_PORTAL_URL") or "https://fitcopilot.com.br/aluno")
+    login_hint = (
+        f"\n\nSua área do aluno: {portal_url}\n"
+        f"Para entrar, use este e-mail: {student.email}. Você vai receber um código de acesso por e-mail."
+        if student.email
+        else f"\n\nSua área do aluno: {portal_url}\nSe precisar acessar, peça para {professional_name} cadastrar seu e-mail."
+    )
+    body = (
+        f"Oi, {student.full_name.split()[0]}! 👋 Seu acompanhamento começou. Eu sou o Agente Fit, assistente do {professional_name}.\n\n"
+        "Por aqui você pode avisar quando treinou, mandar foto ou descrição das refeições, tirar dúvidas rápidas e receber lembretes do seu acompanhamento.\n\n"
+        "Pra usar é simples: me responda como falaria no WhatsApp mesmo. Ex: “treinei hoje”, “almoço: arroz, feijão e frango” ou envie uma foto do prato. 💪"
+        f"{login_hint}"
+    )
+    session = _upsert_session(student=student, flow="onboarding", step="awaiting_confirmation", context={"source": "student_created"})
     dispatch = queue_whatsapp_dispatch(
         student=student,
         actor_user_id=actor_user_id,
@@ -416,12 +439,15 @@ def send_workout_of_day(*, student: StudentProfile, actor_user_id, enqueue: bool
         raise ApiError("Aluno sem ficha ativa para envio.", HTTPStatus.CONFLICT)
     serialized = serialize_workout_plan(plan)
     exercises_count = sum(len(day["exercises"]) for day in serialized["days"])
+    portal_url = str(current_app.config.get("STUDENT_PORTAL_URL") or "http://127.0.0.1:3000/aluno")
+    first_name = student.full_name.split()[0] if student.full_name else "aluno"
     body = (
-        f"Seu treino de hoje: {plan.title} 💪\n\n"
-        f"São {exercises_count} exercícios. "
-        f"{plan.objective or 'Foque em boa execução.'}"
+        f"Oi, {first_name}! Seu treino de hoje já está na sua ficha: {plan.title} 💪\n\n"
+        f"São {exercises_count} exercícios. Abra o link para ver tudo detalhado e registrar a carga de cada exercício:\n"
+        f"{portal_url}\n\n"
+        "Se pedir código, use seu e-mail cadastrado para entrar."
     )
-    session = _upsert_session(student=student, flow="workout_execution", step="awaiting_start", context={"plan_id": str(plan.id)})
+    session = _upsert_session(student=student, flow="workout_execution", step="portal_link_sent", context={"plan_id": str(plan.id), "portal_url": portal_url})
     return queue_whatsapp_dispatch(
         student=student,
         actor_user_id=actor_user_id,
@@ -430,14 +456,256 @@ def send_workout_of_day(*, student: StudentProfile, actor_user_id, enqueue: bool
         related_entity_id=plan.id,
         idempotency_key=_idempotency_key("workout-of-day", student, date.today().isoformat()),
         external_reference=f"student:{student.id}:workout_of_day:{date.today().isoformat()}",
-        payload=_build_text_payload(
-            body=body,
-            message_type="interactive",
-            buttons=[
-                {"type": "reply", "id": "start_workout", "title": "Começar treino"},
-                {"type": "reply", "id": "need_other", "title": "Outro treino"},
-            ],
-        ),
+        payload=_build_text_payload(body=body),
+        enqueue=enqueue,
+    )
+
+
+def _positive_workout_completion_reply(text: str | None, parsed_intent: str | None = None) -> bool:
+    normalized = (text or "").strip().lower()
+    positive_tokens = {
+        "s",
+        "sim",
+        "ss",
+        "ok",
+        "pronto",
+        "feito",
+        "acabei",
+        "terminei",
+        "terminei sim",
+        "finalizei",
+        "finalizei sim",
+        "conclui",
+        "conclui sim",
+        "ja",
+        "já",
+        "ja treinei",
+        "já treinei",
+        "ja terminei",
+        "já terminei",
+    }
+    if parsed_intent in {"workout_finish", "confirm_training_yes"}:
+        return True
+    if normalized in positive_tokens:
+        return True
+    return any(phrase in normalized for phrase in ["terminei", "finalizei", "conclui", "treino feito", "ja treinei", "já treinei"])
+
+
+def _latest_pending_workout_session(student: StudentProfile) -> WorkoutSession | None:
+    return (
+        WorkoutSession.query.filter_by(student_id=student.id, status="pending")
+        .order_by(WorkoutSession.created_at.desc())
+        .first()
+    )
+
+
+def _send_workout_completion_check(session: WorkoutSession, *, repeat_index: int, enqueue: bool = True) -> OutboundMessageDispatch:
+    student = session.student
+    first_name = student.full_name.split()[0] if student.full_name else "aluno"
+    body = (
+        f"Oi, {first_name}! Vi que seu treino ainda ficou aberto por aqui. 💪\n\n"
+        "Você já terminou?\n"
+        "Pode responder só *sim* ou *não*."
+    )
+    return queue_whatsapp_dispatch(
+        student=student,
+        actor_user_id=student.primary_professional.user_id if student.primary_professional else None,
+        message_category="workout_completion_check",
+        related_entity_type="workout_session",
+        related_entity_id=session.id,
+        idempotency_key=_idempotency_key("workout-completion-check", student, f"{session.id}:{repeat_index}"),
+        external_reference=f"student:{student.id}:workout_completion_check:{session.id}:{repeat_index}",
+        payload=_build_text_payload(body=body),
+        enqueue=enqueue,
+    )
+
+
+def _send_workout_auto_completed_notice(session: WorkoutSession, *, enqueue: bool = True) -> OutboundMessageDispatch:
+    student = session.student
+    first_name = student.full_name.split()[0] if student.full_name else "aluno"
+    body = (
+        f"{first_name}, como seu treino ficou aberto por algumas horas, finalizei automaticamente por aqui. ✅\n\n"
+        "Se algo ficou diferente, me responde aqui com uma observação que eu deixo registrado para seu personal."
+    )
+    return queue_whatsapp_dispatch(
+        student=student,
+        actor_user_id=student.primary_professional.user_id if student.primary_professional else None,
+        message_category="workout_auto_completed_notice",
+        related_entity_type="workout_session",
+        related_entity_id=session.id,
+        idempotency_key=_idempotency_key("workout-auto-completed", student, str(session.id)),
+        external_reference=f"student:{student.id}:workout_auto_completed:{session.id}",
+        payload=_build_text_payload(body=body),
+        enqueue=enqueue,
+    )
+
+
+def check_pending_workout_sessions(*, now: datetime | None = None) -> dict:
+    now = now or utcnow()
+    sessions = WorkoutSession.query.filter_by(status="pending").order_by(WorkoutSession.created_at.asc()).all()
+    checked = prompted = auto_completed = skipped = 0
+    for session in sessions:
+        checked += 1
+        student = session.student
+        if not student or student.archived_at is not None:
+            skipped += 1
+            continue
+
+        created_at = session.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age = now - created_at
+        checks = (
+            OutboundMessageDispatch.query.filter_by(
+                related_entity_type="workout_session",
+                related_entity_id=str(session.id),
+                message_category="workout_completion_check",
+            )
+            .order_by(OutboundMessageDispatch.created_at.desc())
+            .all()
+        )
+        latest_check = checks[0] if checks else None
+
+        if age >= timedelta(hours=5):
+            complete_workout_session_without_logs(session=session, actor_user_id=None, note="Finalizado automaticamente apos 5h sem conclusao manual.")
+            _send_workout_auto_completed_notice(session)
+            auto_completed += 1
+            continue
+
+        if age < timedelta(hours=2):
+            skipped += 1
+            continue
+
+        should_prompt = latest_check is None
+        if latest_check is not None:
+            last_check_at = latest_check.created_at
+            if last_check_at.tzinfo is None:
+                last_check_at = last_check_at.replace(tzinfo=timezone.utc)
+            has_reply_after_check = InboundMessageRecord.query.filter(
+                InboundMessageRecord.student_id == session.student_id,
+                InboundMessageRecord.received_at > last_check_at,
+            ).first()
+            should_prompt = has_reply_after_check is None and (now - last_check_at) >= timedelta(hours=2)
+
+        if should_prompt:
+            _send_workout_completion_check(session, repeat_index=len(checks) + 1)
+            prompted += 1
+        else:
+            skipped += 1
+
+    return {"status": "completed", "checked": checked, "prompted": prompted, "auto_completed": auto_completed, "skipped": skipped}
+
+
+def _signals_for_day(student: StudentProfile, target_date: date, signal_type: str | None = None) -> list[StudentDailySignal]:
+    query = StudentDailySignal.query.filter_by(student_id=student.id, signal_date=target_date)
+    if signal_type:
+        query = query.filter_by(signal_type=signal_type)
+    return query.order_by(StudentDailySignal.created_at.asc()).all()
+
+
+def _meal_calorie_range(meal: StudentDailySignal) -> tuple[int, int] | None:
+    payload = meal.payload_json or {}
+    calorie_range = payload.get("calorie_range") or {}
+    low = calorie_range.get("min")
+    high = calorie_range.get("max")
+    if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+        return int(low), int(high)
+    estimated = payload.get("estimated_calories")
+    if isinstance(estimated, (int, float)):
+        value = int(estimated)
+        return value, value
+    return None
+
+
+def _daily_calorie_range(student: StudentProfile, target_date: date) -> tuple[int, int] | None:
+    low_total = 0
+    high_total = 0
+    found = False
+    for meal in _signals_for_day(student, target_date, "meal"):
+        item_range = _meal_calorie_range(meal)
+        if item_range is None:
+            continue
+        low, high = item_range
+        low_total += low
+        high_total += high
+        found = True
+    if not found:
+        return None
+    return low_total, high_total
+
+
+def _format_daily_calories(calorie_range: tuple[int, int] | None) -> str:
+    if calorie_range is None:
+        return "Ainda não tenho calorias suficientes para estimar com segurança."
+    low, high = calorie_range
+    if low == high:
+        return f"Total estimado: cerca de {low} kcal."
+    return f"Total estimado: entre {low} e {high} kcal."
+
+
+def _tomorrow_recommendation(*, meals_count: int, calorie_range: tuple[int, int] | None, workout_count: int) -> str:
+    if meals_count == 0:
+        return "Amanhã, me manda pelo menos uma refeição e o treino quando concluir. Assim seu personal acompanha melhor."
+    if calorie_range is not None:
+        low, high = calorie_range
+        if high < 1400:
+            return "Amanhã, tenta não deixar grandes janelas sem comer e garante uma fonte de proteína nas principais refeições."
+        if low > 2800:
+            return "Amanhã, mantém proteína e hidratação, mas observa porções de carboidrato e gordura para não passar muito do alvo."
+    if workout_count == 0:
+        return "Amanhã, se for treinar, evita ir em jejum longo e me avisa quando concluir para eu fechar melhor seu dia."
+    return "Amanhã, mantém boa hidratação e tenta repetir o básico: proteína, carboidrato na medida e consistência."
+
+
+def build_end_of_day_report_text(student: StudentProfile, target_date: date | None = None) -> str:
+    target_date = target_date or date.today()
+    meals = _signals_for_day(student, target_date, "meal")
+    workouts = _signals_for_day(student, target_date, "workout")
+    calorie_range = _daily_calorie_range(student, target_date)
+    first_name = student.full_name.split()[0]
+    meal_line = f"Hoje registrei {len(meals)} refeição." if len(meals) == 1 else f"Hoje registrei {len(meals)} refeições."
+    workout_line = "Treino: registrado hoje." if workouts else "Treino: ainda não registrado hoje."
+    recommendation = _tomorrow_recommendation(
+        meals_count=len(meals),
+        calorie_range=calorie_range,
+        workout_count=len(workouts),
+    )
+    return (
+        f"Fechamento do dia, {first_name} 🌙\n\n"
+        f"{meal_line}\n"
+        f"{_format_daily_calories(calorie_range)}\n"
+        f"{workout_line}\n\n"
+        f"Para amanhã: {recommendation}"
+    )
+
+
+def send_end_of_day_report(
+    *,
+    student: StudentProfile,
+    actor_user_id,
+    summary_date: date | None = None,
+    enqueue: bool = True,
+) -> OutboundMessageDispatch:
+    phone = normalize_phone(student.phone)
+    if not phone:
+        raise ApiError("Aluno sem telefone válido para WhatsApp.", HTTPStatus.CONFLICT)
+    target_date = summary_date or date.today()
+    body = build_end_of_day_report_text(student, target_date)
+    session = _upsert_session(
+        student=student,
+        flow="daily_report",
+        step="sent",
+        context={"summary_date": target_date.isoformat()},
+    )
+    return queue_whatsapp_dispatch(
+        student=student,
+        actor_user_id=actor_user_id,
+        message_category="daily_report",
+        related_entity_type="whatsapp_session",
+        related_entity_id=session.id,
+        idempotency_key=_idempotency_key("daily-report", student, target_date.isoformat()),
+        external_reference=f"student:{student.id}:daily_report:{target_date.isoformat()}",
+        payload=_build_text_payload(body=body),
         enqueue=enqueue,
     )
 
@@ -459,6 +727,31 @@ def send_manual_whatsapp_message(*, student: StudentProfile, actor_user_id, mess
     )
 
 
+def send_professional_note_whatsapp_message(*, student: StudentProfile, actor_user_id, message_text: str, enqueue: bool = True) -> OutboundMessageDispatch:
+    clean_text = (message_text or "").strip()
+    if not clean_text:
+        raise ApiError("Mensagem vazia.", HTTPStatus.BAD_REQUEST)
+    professional_user = student.primary_professional.user if student.primary_professional and student.primary_professional.user else None
+    professional_phone = normalize_phone(professional_user.phone) if professional_user and professional_user.phone else None
+    contact_line = (
+        f"Se quiser alinhar algum detalhe, fale direto com ele pelo {professional_phone} ou pessoalmente."
+        if professional_phone
+        else "Se quiser alinhar algum detalhe, fale direto com ele pelo WhatsApp pessoal ou pessoalmente."
+    )
+    body = (
+        f"Olá, {student.full_name.split()[0]}! Seu personal deixou um recado:\n\n"
+        f"{clean_text}\n\n"
+        f"{contact_line}"
+    )
+    return send_manual_whatsapp_message(
+        student=student,
+        actor_user_id=actor_user_id,
+        message_text=body,
+        message_type="text",
+        enqueue=enqueue,
+    )
+
+
 def send_suggested_message(*, student: StudentProfile, actor_user_id, suggestion: SuggestedMessage, enqueue: bool = True) -> OutboundMessageDispatch:
     suggestion.status = "queued"
     suggestion.acted_at = utcnow()
@@ -475,6 +768,44 @@ def send_suggested_message(*, student: StudentProfile, actor_user_id, suggestion
     return dispatch
 
 
+def _dispatch_text_body(payload: dict) -> str:
+    message_type = payload.get("message_type", "text")
+    if message_type == "interactive":
+        body = payload.get("interactive", {}).get("body", "")
+        buttons = payload.get("interactive", {}).get("buttons", [])
+        options = [str(item.get("title") or "").strip() for item in buttons if item.get("title")]
+        if options:
+            return f"{body}\n\nOpções: {', '.join(options)}"
+        return body
+    if message_type == "media":
+        media = payload.get("media", {})
+        return str(media.get("caption") or media.get("link") or "")
+    if message_type == "template":
+        template = payload.get("template", {})
+        return str(template.get("body") or template.get("name") or "")
+    return str(payload.get("text", {}).get("body", ""))
+
+
+def _send_dispatch_via_local_bot(*, dispatch: OutboundMessageDispatch, student: StudentProfile, phone: str, payload: dict) -> dict:
+    base_url = str(current_app.config.get("WWP_BOT_INTERNAL_URL") or "").rstrip("/")
+    if not base_url:
+        raise RuntimeError("WWP_BOT_INTERNAL_URL não configurado")
+    body = _dispatch_text_body(payload)
+    if not body:
+        raise RuntimeError("Mensagem sem texto para envio pelo bot local")
+    response = requests.post(
+        f"{base_url}/internal/messages/send",
+        json={"phoneNumber": phone, "text": body},
+        timeout=float(current_app.config.get("CORE_TIMEOUT_SECONDS", 15)),
+    )
+    response.raise_for_status()
+    data = response.json()
+    return {
+        "public_id": data.get("result", {}).get("key", {}).get("id") or f"wwp-bot:{dispatch.id}",
+        "channel_account_id": "wwp-bot-local",
+    }
+
+
 def perform_dispatch(dispatch_id: str) -> OutboundMessageDispatch:
     dispatch = OutboundMessageDispatch.query.filter_by(id=dispatch_id).first()
     if dispatch is None:
@@ -486,56 +817,60 @@ def perform_dispatch(dispatch_id: str) -> OutboundMessageDispatch:
         db.session.commit()
         raise ApiError("Aluno sem telefone válido.", HTTPStatus.CONFLICT)
 
-    token, org_id = _owner_context(student)
     payload = dispatch.payload_json or {}
     message_type = payload.get("message_type", "text")
-    if message_type == "interactive":
-        response = core_messaging_client.send_interactive_message(
-            token=token,
-            to_phone=phone,
-            body=payload.get("interactive", {}).get("body", ""),
-            buttons=payload.get("interactive", {}).get("buttons", []),
-            idempotency_key=dispatch.idempotency_key,
-            external_reference=dispatch.external_reference,
-            requested_by_service=dispatch.requested_by_service,
-            org_id=org_id,
-        )
-    elif message_type == "media":
-        media = payload.get("media", {})
-        response = core_messaging_client.send_media_message(
-            token=token,
-            to_phone=phone,
-            media_url=media.get("link", ""),
-            media_type=media.get("type", "document"),
-            caption=media.get("caption"),
-            idempotency_key=dispatch.idempotency_key,
-            external_reference=dispatch.external_reference,
-            requested_by_service=dispatch.requested_by_service,
-            org_id=org_id,
-        )
-    elif message_type == "template":
-        template = payload.get("template", {})
-        response = core_messaging_client.send_template_message(
-            token=token,
-            to_phone=phone,
-            template_name=template.get("name", ""),
-            language_code=template.get("language_code", "pt_BR"),
-            components=template.get("components", []),
-            idempotency_key=dispatch.idempotency_key,
-            external_reference=dispatch.external_reference,
-            requested_by_service=dispatch.requested_by_service,
-            org_id=org_id,
-        )
-    else:
-        response = core_messaging_client.send_text_message(
-            token=token,
-            to_phone=phone,
-            body=payload.get("text", {}).get("body", ""),
-            idempotency_key=dispatch.idempotency_key,
-            external_reference=dispatch.external_reference,
-            requested_by_service=dispatch.requested_by_service,
-            org_id=org_id,
-        )
+    try:
+        token, org_id = _owner_context(student)
+        if message_type == "interactive":
+            response = core_messaging_client.send_interactive_message(
+                token=token,
+                to_phone=phone,
+                body=payload.get("interactive", {}).get("body", ""),
+                buttons=payload.get("interactive", {}).get("buttons", []),
+                idempotency_key=dispatch.idempotency_key,
+                external_reference=dispatch.external_reference,
+                requested_by_service=dispatch.requested_by_service,
+                org_id=org_id,
+            )
+        elif message_type == "media":
+            media = payload.get("media", {})
+            response = core_messaging_client.send_media_message(
+                token=token,
+                to_phone=phone,
+                media_url=media.get("link", ""),
+                media_type=media.get("type", "document"),
+                caption=media.get("caption"),
+                idempotency_key=dispatch.idempotency_key,
+                external_reference=dispatch.external_reference,
+                requested_by_service=dispatch.requested_by_service,
+                org_id=org_id,
+            )
+        elif message_type == "template":
+            template = payload.get("template", {})
+            response = core_messaging_client.send_template_message(
+                token=token,
+                to_phone=phone,
+                template_name=template.get("name", ""),
+                language_code=template.get("language_code", "pt_BR"),
+                components=template.get("components", []),
+                idempotency_key=dispatch.idempotency_key,
+                external_reference=dispatch.external_reference,
+                requested_by_service=dispatch.requested_by_service,
+                org_id=org_id,
+            )
+        else:
+            response = core_messaging_client.send_text_message(
+                token=token,
+                to_phone=phone,
+                body=payload.get("text", {}).get("body", ""),
+                idempotency_key=dispatch.idempotency_key,
+                external_reference=dispatch.external_reference,
+                requested_by_service=dispatch.requested_by_service,
+                org_id=org_id,
+            )
+    except Exception as exc:
+        current_app.logger.warning("core_whatsapp_dispatch_failed_using_local_bot dispatch_id=%s error=%s", dispatch.id, exc)
+        response = _send_dispatch_via_local_bot(dispatch=dispatch, student=student, phone=phone, payload=payload)
 
     dispatch.core_message_public_id = str(response.get("public_id") or response.get("id") or "")
     dispatch.core_channel_account_id = str(response.get("channel_account_id") or response.get("channelAccountId") or "") or None
@@ -665,11 +1000,17 @@ def process_inbound_message(inbound_id: str) -> dict:
     signal_type = "message"
     signal_title = inbound.text_body or "Mensagem recebida no WhatsApp"
     response_text = "Entendi. Vou registrar isso e seu profissional podera ver no acompanhamento."
+    pending_workout_session = _latest_pending_workout_session(student)
+    answered_pending_workout = bool(pending_workout_session and _positive_workout_completion_reply(inbound.text_body, inbound.parsed_intent))
 
-    if inbound.parsed_intent == "confirm_training_yes":
+    if answered_pending_workout:
+        signal_type = "workout"
+        signal_title = "Aluno confirmou treino concluido pelo WhatsApp"
+        response_text = "Boa! Finalizei seu treino por aqui ?"
+    elif inbound.parsed_intent == "confirm_training_yes":
         signal_type = "manual_note"
         signal_title = "Aluno confirmou que vai treinar hoje"
-        response_text = "Perfeito ✅ Vou te mandar o treino de hoje."
+        response_text = "Perfeito ? Vou te mandar o treino de hoje."
     elif inbound.parsed_intent == "confirm_training_no":
         signal_type = "absence"
         signal_title = "Aluno informou que não vai treinar hoje"
@@ -716,7 +1057,19 @@ def process_inbound_message(inbound_id: str) -> dict:
     inbound.processed = True
     inbound.processing_status = "completed"
 
-    if inbound.parsed_intent == "confirm_training_yes":
+    if answered_pending_workout and pending_workout_session:
+        complete_workout_session_without_logs(
+            session=pending_workout_session,
+            actor_user_id=None,
+            note=f"Finalizado por resposta no WhatsApp: {inbound.text_body or inbound.parsed_intent}",
+        )
+        send_manual_whatsapp_message(
+            student=student,
+            actor_user_id=student.primary_professional.user_id if student.primary_professional else None,
+            message_text=response_text,
+            enqueue=False,
+        )
+    elif inbound.parsed_intent == "confirm_training_yes":
         send_workout_of_day(student=student, actor_user_id=student.primary_professional.user_id if student.primary_professional else None, enqueue=False)
     elif inbound.parsed_intent == "ask_for_workout":
         send_workout_of_day(student=student, actor_user_id=student.primary_professional.user_id if student.primary_professional else None, enqueue=False)

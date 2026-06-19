@@ -43,7 +43,19 @@ class ReferralGateway:
                     {"email": "demo@aluno.com", "status": "active", "activated_at": "2026-05-01T00:00:00"}
                 ],
             }
-        return core_client.request(method="GET", path="/referral/stats/", token=token)
+        raw = core_client.request(method="GET", path="/referral/stats/", token=token)
+        return {
+            "referral_code": raw.get("referral_code"),
+            "referral_url": raw.get("referral_url") or raw.get("referral_link"),
+            "active_referrals": int(raw.get("active_referrals") or raw.get("total_active_referrals") or 0),
+            "pending_referrals": int(raw.get("pending_referrals") or 0),
+            "churned_referrals": int(raw.get("churned_referrals") or 0),
+            "monthly_credit_brl": str(raw.get("monthly_credit_brl") or raw.get("total_commission_pending") or "0.00"),
+            "gross_credit_brl": str(raw.get("gross_credit_brl") or raw.get("total_commission_generated") or "0.00"),
+            "credit_cap_brl": str(raw.get("credit_cap_brl") or "75.00"),
+            "next_threshold": raw.get("next_threshold"),
+            "recent_conversions": raw.get("recent_conversions") or [],
+        }
 
     # ------------------------------------------------------------------
     # Crédito mensal

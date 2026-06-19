@@ -14,7 +14,9 @@ from app.whatsapp.services import (
     list_whatsapp_history,
     record_inbound_message,
     send_daily_checkin,
+    send_end_of_day_report,
     send_manual_whatsapp_message,
+    send_professional_note_whatsapp_message,
     send_onboarding_message,
     send_suggested_message,
     send_workout_of_day,
@@ -68,17 +70,25 @@ def send_student_workout(student_id):
     return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
 
 
+@whatsapp_bp.post("/students/<uuid:student_id>/whatsapp/send-daily-report")
+@require_auth({"owner", "professional", "admin"})
+def send_student_daily_report(student_id):
+    auth = current_auth()
+    student = require_student(auth.account_id, student_id)
+    dispatch = send_end_of_day_report(student=student, actor_user_id=auth.user.id)
+    return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
+
+
 @whatsapp_bp.post("/students/<uuid:student_id>/whatsapp/send-message")
 @require_auth({"owner", "professional", "admin"})
 def send_student_message(student_id):
     auth = current_auth()
     student = require_student(auth.account_id, student_id)
     payload = parse_json(SendStudentWhatsAppMessageInput)
-    dispatch = send_manual_whatsapp_message(
+    dispatch = send_professional_note_whatsapp_message(
         student=student,
         actor_user_id=auth.user.id,
         message_text=payload.message_text,
-        message_type=payload.message_type,
     )
     return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
 

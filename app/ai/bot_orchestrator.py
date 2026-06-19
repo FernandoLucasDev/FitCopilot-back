@@ -4,6 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from flask import current_app
 from sqlalchemy.orm.attributes import flag_modified
@@ -12,7 +13,13 @@ from app.ai.local_agent import fitcopilot_agent
 from app.extensions import db
 from app.operations.services import emit_event, evaluate_retention_automation, recompute_and_persist_score
 from app.students.models import StudentDailySignal, StudentDailySummary, StudentInteraction, StudentProfile
-from app.workouts.services import get_active_workout_for_student, serialize_workout_plan, summarize_workout_consistency
+from app.workouts.services import (
+    create_workout_session,
+    get_active_workout_for_student,
+    list_student_workout_plans,
+    serialize_workout_plan,
+    summarize_workout_consistency,
+)
 
 
 @dataclass
@@ -67,7 +74,11 @@ def resolve_student_by_phone(phone: str | None) -> StudentProfile | None:
     variants = phone_variants(phone)
     if not variants:
         return None
-    students = StudentProfile.query.filter(StudentProfile.phone.isnot(None), StudentProfile.archived_at.is_(None)).all()
+    students = (
+        StudentProfile.query.filter(StudentProfile.phone.isnot(None), StudentProfile.archived_at.is_(None))
+        .order_by(StudentProfile.created_at.desc())
+        .all()
+    )
     for variant in variants:
         for student in students:
             if normalize_phone(student.phone) == variant:
@@ -104,6 +115,13 @@ def _recent_interactions(student: StudentProfile) -> list[dict]:
 def _active_workout_payload(student: StudentProfile) -> dict | None:
     plan = get_active_workout_for_student(student.id)
     return serialize_workout_plan(plan) if plan else None
+
+
+def _student_workout_payloads(student: StudentProfile) -> list[dict]:
+    plans = list_student_workout_plans(account_id=student.account_id, student_id=student.id)
+    active = [plan for plan in plans if plan.get("status") == "active"]
+    others = [plan for plan in plans if plan.get("status") != "active"]
+    return active + others
 
 
 def _today_summary_text(student: StudentProfile) -> str:
@@ -275,6 +293,27 @@ def _daily_calorie_range(student: StudentProfile) -> tuple[int, int]:
     return min_total, max_total
 
 
+def _daily_macro_totals(student: StudentProfile) -> dict[str, int]:
+    totals = {"protein": 0, "carbs": 0, "fats": 0}
+    seen: set[str] = set()
+    for signal in _meal_signals_today(student):
+        key = _meal_dedupe_key(signal.body)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        payload = signal.payload_json or {}
+        for payload_key, total_key in (
+            ("protein_grams", "protein"),
+            ("carbs_grams", "carbs"),
+            ("fats_grams", "fats"),
+        ):
+            value = payload.get(payload_key)
+            if isinstance(value, int):
+                totals[total_key] += value
+    return totals
+
+
 def _meal_dedupe_key(text: str | None) -> str:
     ascii_text = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode("ascii")
     normalized = re.sub(r"[^a-z0-9]+", " ", ascii_text.lower()).strip()
@@ -338,24 +377,86 @@ def _format_total_calories(student: StudentProfile) -> str:
     return f"Total estimado do dia até agora: entre {min_total} e {max_total} kcal."
 
 
+def _format_macros(protein: int | None, carbs: int | None, fats: int | None) -> str:
+    parts = []
+    if protein is not None:
+        parts.append(f"{protein}g proteína")
+    if carbs is not None:
+        parts.append(f"{carbs}g carbo")
+    if fats is not None:
+        parts.append(f"{fats}g gordura")
+    return "Macros estimados: " + " · ".join(parts) + "." if parts else "Macros ainda sem estimativa confiável."
+
+
+def _daily_nutrition_guidance(student: StudentProfile, analysis) -> str:
+    totals = _daily_macro_totals(student)
+    tips: list[str] = []
+    goal = (student.main_objective_text or "").lower()
+    if totals["protein"] < 80:
+        tips.append("tenta puxar mais proteína nas próximas refeições")
+    if ("massa" in goal or "hipertrof" in goal) and totals["carbs"] < 160:
+        tips.append("mantém uma boa fonte de carboidrato para sustentar treino e ganho de massa")
+    if totals["fats"] > 80:
+        tips.append("segura um pouco as frituras/gorduras no restante do dia")
+    if not tips and totals["carbs"] < 90:
+        tips.append("se ainda for treinar, coloca um carboidrato simples antes ou depois")
+    if tips:
+        return "Dica: " + "; ".join(tips[:2]) + "."
+    return analysis.guidance_text
+
+
 def _workout_choices(student: StudentProfile) -> list[dict]:
-    workout = _active_workout_payload(student)
-    if not workout:
+    plans = _student_workout_payloads(student)
+    if not plans:
         return []
     choices: list[dict] = []
-    for index, day in enumerate(workout["days"], start=1):
-        choices.append(
-            {
-                "key": str(index),
-                "label": str(day["label"]),
-                "dayId": str(day["id"]),
-                "exerciseCount": len(day["exercises"]),
-            }
-        )
+    index = 1
+    for plan in plans:
+        for day in plan.get("days", []):
+            choices.append(
+                {
+                    "key": str(index),
+                    "planId": str(plan["id"]),
+                    "planTitle": str(plan["title"]),
+                    "planStatus": str(plan.get("status") or "draft"),
+                    "label": str(day["label"]),
+                    "dayId": str(day["id"]),
+                    "exerciseCount": len(day["exercises"]),
+                }
+            )
+            index += 1
     return choices
 
 
 def _format_workout_choices(student: StudentProfile) -> str:
+    plans = _student_workout_payloads(student)
+    if not plans:
+        return "Hoje eu ainda não encontrei uma ficha sua. Me chama aqui que eu sinalizo isso para seu profissional ✅"
+    choices = _workout_choices(student)
+    days_by_id = {str(day["id"]): (plan, day) for plan in plans for day in plan.get("days", [])}
+    lines = []
+    for item in choices:
+        plan_day = days_by_id.get(str(item["dayId"]))
+        plan, day = plan_day if plan_day else ({}, None)
+        exercises = day.get("exercises", []) if day else []
+        exercise_names = [str(exercise.get("exerciseName") or "").strip() for exercise in exercises]
+        exercise_names = [name for name in exercise_names if name]
+        preview = ", ".join(exercise_names[:4])
+        remaining_count = max(len(exercise_names) - 4, 0)
+        suffix = f" + {remaining_count} mais" if remaining_count else ""
+        plan_label = f"{plan.get('title', item['planTitle'])} · " if len(plans) > 1 else ""
+        if preview:
+            lines.append(f"{item['key']}. {plan_label}{item['label']} ({item['exerciseCount']} exercícios)\n   {preview}{suffix}")
+        else:
+            lines.append(f"{item['key']}. {plan_label}{item['label']} ({item['exerciseCount']} exercícios)")
+    active_title = plans[0]["title"] if plans and plans[0].get("status") == "active" else "suas fichas"
+    return (
+        f"Hoje você tem {active_title} 💪\n\n"
+        f"Me diz qual treino você vai fazer:\n" +
+        "\n".join(lines) +
+        "\n\nPode responder com o número ou com o nome do treino."
+    )
+
     workout = _active_workout_payload(student)
     if not workout:
         return "Hoje eu ainda não encontrei uma ficha ativa sua. Me chama aqui que eu sinalizo isso para seu profissional ✅"
@@ -383,6 +484,23 @@ def _format_workout_choices(student: StudentProfile) -> str:
 
 
 def _resolve_workout_choice(student: StudentProfile, text: str, metadata: dict) -> dict | None:
+    plans = _student_workout_payloads(student)
+    if not plans:
+        return None
+    choices = metadata.get("availableWorkouts") or _workout_choices(student)
+    normalized = text.strip().lower()
+    for item in choices:
+        key = str(item.get("key", "")).lower()
+        label = str(item.get("label", "")).lower()
+        plan_title = str(item.get("planTitle", "")).lower()
+        if normalized == key or normalized == label or normalized == label.replace("treino ", "") or normalized == plan_title:
+            day_id = str(item.get("dayId"))
+            for plan in plans:
+                for day in plan.get("days", []):
+                    if str(day["id"]) == day_id or str(day["label"]).lower() == label:
+                        return {**day, "planId": str(plan["id"]), "planTitle": str(plan["title"])}
+    return None
+
     workout = _active_workout_payload(student)
     if not workout:
         return None
@@ -417,8 +535,64 @@ def _selected_workout_insight(student: StudentProfile, day: dict) -> str:
     return (
         f"{day['label']} escolhido ✅\n\n"
         f"{insight}\n\n"
-        "Quando concluir, me manda como foi: leve, normal ou pesado."
+        "Pode me mandar as cargas também. Ex: supino 40kg, remada 35kg. Pode ser tudo junto ou exercício por exercício."
     )
+
+
+def _parse_workout_loads(text: str, day: dict | None) -> list[dict]:
+    if not day:
+        return []
+    normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
+    logs: list[dict] = []
+    for exercise in day.get("exercises", []):
+        name = str(exercise.get("exerciseName") or "").strip()
+        if not name:
+            continue
+        name_key = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii").lower()
+        tokens = [token for token in re.split(r"\s+", name_key) if len(token) >= 4]
+        if not tokens or not any(token in normalized for token in tokens[:3]):
+            continue
+        match = re.search(rf"{re.escape(tokens[0])}[^,\n;]*?(\d+(?:[,.]\d+)?)\s*(kg|kgs|quilos?)", normalized)
+        if match:
+            value = match.group(1).replace(",", ".")
+            logs.append(
+                {
+                    "exercise_name": name,
+                    "sets_completed": exercise.get("setsCount"),
+                    "reps_completed": exercise.get("repsText"),
+                    "notes": f"Carga informada no WhatsApp: {value} kg",
+                }
+            )
+    return logs
+
+
+def _selected_workout_day_from_metadata(student: StudentProfile, metadata: dict) -> dict | None:
+    day_id = str(metadata.get("selectedWorkoutDayId") or "")
+    if not day_id:
+        return None
+    for plan in _student_workout_payloads(student):
+        for day in plan.get("days", []):
+            if str(day.get("id")) == day_id:
+                return {**day, "planId": str(plan["id"]), "planTitle": str(plan["title"])}
+    return None
+
+
+def _register_workout_loads_from_whatsapp(student: StudentProfile, text: str, metadata: dict) -> tuple[bool, int]:
+    day = _selected_workout_day_from_metadata(student, metadata)
+    logs = _parse_workout_loads(text, day)
+    plan_id = metadata.get("selectedWorkoutPlanId") or (day or {}).get("planId")
+    if not day or not plan_id or not logs:
+        return False, 0
+    payload = SimpleNamespace(
+        student_id=str(student.id),
+        plan_id=str(plan_id),
+        date=date.today(),
+        status="completed",
+        notes=f"Cargas registradas via WhatsApp para {day.get('label')}.",
+        exercises=[SimpleNamespace(**item) for item in logs],
+    )
+    create_workout_session(account_id=student.account_id, actor_user_id=None, data=payload)
+    return True, len(logs)
 
 
 def _is_image_message(message_type: str) -> bool:
@@ -500,10 +674,13 @@ def _handle_meal(student: StudentProfile, text: str, *, message_type: str, metad
     )
     _sync_student_operations(student)
     db.session.commit()
+    macros_text = _format_macros(analysis.protein_grams, analysis.carbs_grams, analysis.fats_grams)
+    guidance_text = _daily_nutrition_guidance(student, analysis)
     reply = (
         f"Registrei sua refeição com {_format_calories(estimated_calories, calorie_range)} 🍽️\n"
         f"{_format_total_calories(student)}\n\n"
-        f"{analysis.guidance_text}"
+        f"{macros_text}\n"
+        f"{guidance_text}"
     )
     return BotReply(
         handled=True,
@@ -613,7 +790,22 @@ def reply_for_whatsapp(*, phone_number: str | None, text: str | None, message_ty
                     "awaitingWorkoutChoice": False,
                     "selectedWorkoutLabel": day["label"],
                     "selectedWorkoutDayId": str(day["id"]),
+                    "selectedWorkoutPlanId": str(day.get("planId") or ""),
                 },
+                student_id=str(student.id),
+                student_name=student.full_name,
+            )
+
+    if metadata.get("selectedWorkoutDayId") and re.search(r"\d+(?:[,.]\d+)?\s*(kg|kgs|quilo|quilos)", normalized_lower):
+        registered, count = _register_workout_loads_from_whatsapp(student, normalized_text, metadata)
+        if registered:
+            _record_interaction(student, title="Cargas de treino registradas no WhatsApp", body=normalized_text)
+            _sync_student_operations(student)
+            db.session.commit()
+            return BotReply(
+                handled=True,
+                reply_text=f"Registrei as cargas de {count} exercício(s) ✅ Pode mandar mais cargas ou responder como foi: leve, normal ou pesado.",
+                next_phase="treino_ativo",
                 student_id=str(student.id),
                 student_name=student.full_name,
             )

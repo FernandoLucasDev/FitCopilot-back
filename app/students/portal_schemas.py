@@ -22,6 +22,7 @@ class StudentExerciseLogInput(ApiSchema):
 
 
 class StudentWorkoutSessionInput(ApiSchema):
+    session_id: str | None = None
     plan_id: str
     date: str | None = None
     status: str = Field(pattern="^(pending|completed|skipped)$")

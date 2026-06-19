@@ -31,6 +31,15 @@ class MealAnalysisResult:
     guidance_text: str
 
 
+@dataclass
+class MediaSafetyResult:
+    allowed: bool
+    category: str
+    severity: str
+    user_message: str
+    confidence: float | None = None
+
+
 class AIProvider:
     def summarize_file(self, *, filename: str, content: bytes, context: dict) -> FileSummaryResult:
         raise NotImplementedError
@@ -45,6 +54,9 @@ class AIProvider:
         raise NotImplementedError
 
     def analyze_meal(self, *, context: dict) -> MealAnalysisResult:
+        raise NotImplementedError
+
+    def moderate_media(self, *, content: bytes, mime_type: str, context: dict) -> MediaSafetyResult:
         raise NotImplementedError
 
     def generate_workout_insight(self, *, context: dict) -> str:

@@ -10,6 +10,7 @@ from app.students.schemas import CreateStudentInput, UpdateStudentInput
 from app.students.services import (
     archive_student,
     create_student,
+    delete_student,
     list_students_for_workspace,
     require_student,
     update_student,
@@ -73,6 +74,16 @@ def archive_student_endpoint(student_id):
     student = require_student(auth.account_id, student_id)
     archive_student(student=student, actor_user_id=auth.user.id)
     return success_response({"id": str(student.id), "status": student.status})
+
+
+@students_bp.delete("/students/<uuid:student_id>")
+@require_auth({"owner", "professional", "admin"})
+def delete_student_endpoint(student_id):
+    auth = current_auth()
+    student = require_student(auth.account_id, student_id)
+    deleted_id = str(student.id)
+    delete_student(student=student, actor_user_id=auth.user.id)
+    return success_response({"id": deleted_id, "status": "deleted"})
 
 
 @students_bp.get("/students/<uuid:student_id>/panel")

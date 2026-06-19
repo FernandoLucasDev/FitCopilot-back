@@ -4,6 +4,7 @@ import mimetypes
 from io import BytesIO
 from pathlib import Path
 
+from celery.schedules import crontab
 from dotenv import load_dotenv
 from flask import Flask, send_file
 
@@ -15,9 +16,30 @@ from app.extensions import celery_app, cors, db, jwt, migrate
 load_dotenv()
 
 
+_sentry_initialized = False
+
+
+def init_sentry(settings: Settings) -> None:
+    global _sentry_initialized
+    if _sentry_initialized or not settings.SENTRY_DSN:
+        return
+
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.SENTRY_ENVIRONMENT,
+        traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+        send_default_pii=settings.SENTRY_SEND_DEFAULT_PII,
+    )
+    _sentry_initialized = True
+
+
 def create_app(config_object: type[Settings] | None = None) -> Flask:
-    app = Flask(__name__)
     settings = config_object() if config_object else Settings()
+    init_sentry(settings)
+
+    app = Flask(__name__)
     app.config.from_mapping(settings.__dict__)
 
     db.init_app(app)
@@ -84,6 +106,8 @@ def register_blueprints(app: Flask) -> None:
     from app.insights.routes import insights_bp
     from app.messaging.routes import messaging_bp
     from app.overview.routes import overview_bp
+    from app.orgs.routes import orgs_bp
+    from app.physical.routes import physical_bp
     from app.reports.routes import reports_bp
     from app.students.routes import students_bp
     from app.students.portal_routes import student_portal_bp
@@ -95,6 +119,7 @@ def register_blueprints(app: Flask) -> None:
     for blueprint in [
         auth_bp,
         overview_bp,
+        orgs_bp,
         students_bp,
         student_portal_bp,
         files_bp,
@@ -102,6 +127,7 @@ def register_blueprints(app: Flask) -> None:
         workouts_bp,
         insights_bp,
         messaging_bp,
+        physical_bp,
         reports_bp,
         whatsapp_bp,
         ai_bp,
@@ -116,6 +142,17 @@ def configure_celery(app: Flask) -> None:
         broker_url=app.config["REDIS_URL"],
         result_backend=app.config["REDIS_URL"],
         task_ignore_result=False,
+        timezone=app.config.get("APP_TIMEZONE", "America/Sao_Paulo"),
+        beat_schedule={
+            "fitcopilot-send-end-of-day-reports": {
+                "task": "send_end_of_day_reports_job",
+                "schedule": crontab(hour=app.config.get("WHATSAPP_DAILY_REPORT_HOUR", 20), minute=0),
+            },
+            "fitcopilot-check-pending-workout-sessions": {
+                "task": "check_pending_workout_sessions_job",
+                "schedule": 600.0,
+            },
+        },
     )
 
     class FlaskTask(celery_app.Task):

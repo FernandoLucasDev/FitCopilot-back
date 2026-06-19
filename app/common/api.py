@@ -33,7 +33,11 @@ def register_error_handlers(app) -> None:
 
     @app.errorhandler(ValidationError)
     def handle_validation_error(error: ValidationError):
-        return error_response("Payload inválido", HTTPStatus.UNPROCESSABLE_ENTITY, {"errors": error.errors()})
+        return error_response(
+            "Revise os campos enviados e tente novamente.",
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            {"errors": error.errors()},
+        )
 
     @app.errorhandler(404)
     def handle_not_found(_error):
@@ -41,4 +45,5 @@ def register_error_handlers(app) -> None:
 
     @app.errorhandler(500)
     def handle_internal_error(_error):
-        return error_response("Erro interno do servidor", HTTPStatus.INTERNAL_SERVER_ERROR)
+        return error_response("Tivemos um erro interno. Tente novamente em instantes.", HTTPStatus.INTERNAL_SERVER_ERROR)
+

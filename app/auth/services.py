@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-import random
+import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 
+import requests
 from flask_jwt_extended import create_access_token
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -17,6 +19,7 @@ from app.common.utils.text import slugify
 from app.extensions import db
 from app.integrations.core_email import core_email_gateway
 from app.jobs.services import create_audit_log
+from app.orgs.services import ensure_owner_membership, list_user_organizations
 
 
 def utcnow() -> datetime:
@@ -28,7 +31,7 @@ def _hash_code(code: str) -> str:
 
 
 def _generate_code() -> str:
-    return f"{random.randint(0, 999999):06d}"
+    return f"{secrets.randbelow(1_000_000):06d}"
 
 
 def register_account_and_owner(data) -> tuple[User, str]:
@@ -86,6 +89,7 @@ def register_account_and_owner(data) -> tuple[User, str]:
     )
     db.session.add(professional)
     account.external_org_id = _extract_external_org_id(core_payload)
+    ensure_owner_membership(user)
     create_audit_log(
         account_id=account.id,
         actor_user_id=user.id,
@@ -99,17 +103,16 @@ def register_account_and_owner(data) -> tuple[User, str]:
 
 
 def authenticate(email: str, password: str) -> tuple[User, str]:
-    core_payload = None
-    if core_auth_service.is_enabled():
-        core_payload = core_auth_service.login(email=email, password=password)
-
     user = User.query.filter_by(email=email, deleted_at=None).first()
     if user is None:
         raise ApiError("Credenciais inválidas", HTTPStatus.UNAUTHORIZED)
-    if not core_payload and not check_password_hash(user.password_hash, password):
+    if not check_password_hash(user.password_hash, password):
         raise ApiError("Credenciais inválidas", HTTPStatus.UNAUTHORIZED)
     if not user.is_active:
         raise ApiError("Usuário inativo", HTTPStatus.FORBIDDEN)
+    core_payload = None
+    if core_auth_service.is_enabled():
+        core_payload = _authenticate_with_core(user=user, password=password)
     user.last_login_at = utcnow()
     if core_payload:
         user.external_user_id = _extract_external_user_id(core_payload)
@@ -118,6 +121,7 @@ def authenticate(email: str, password: str) -> tuple[User, str]:
         external_org_id = _extract_external_org_id(core_payload)
         if user.account and external_org_id:
             user.account.external_org_id = external_org_id
+    ensure_owner_membership(user)
     db.session.commit()
     return user, issue_token(user)
 
@@ -153,7 +157,8 @@ def request_professional_password_reset(*, email: str, requested_by_ip: str | No
     else:
         challenge.delivery_status = "debug"
     db.session.commit()
-    return {"status": "accepted", "expiresInSeconds": 600, "debugCode": code if challenge.delivery_status != "sent" else None}
+    is_dev = os.getenv("FLASK_ENV", "development").lower() != "production"
+    return {"status": "accepted", "expiresInSeconds": 600, "debugCode": code if is_dev and challenge.delivery_status != "sent" else None}
 
 
 def verify_professional_password_reset(*, email: str, code: str, new_password: str) -> dict:
@@ -191,6 +196,11 @@ def issue_token(user: User) -> str:
 def build_auth_payload(user: User, token: str | None = None) -> dict:
     professional = user.professional_profile
     account = user.account
+    try:
+        organizations = list_user_organizations(user)
+    except Exception:
+        organizations = []
+
     return {
         "token": token,
         "user": {
@@ -221,6 +231,7 @@ def build_auth_payload(user: User, token: str | None = None) -> dict:
             "hasCoreSession": bool(user.core_access_token),
             "externalOrgId": account.external_org_id if account else None,
         },
+        "organizations": organizations,
     }
 
 
@@ -270,7 +281,37 @@ def _extract_external_org_id(payload: dict | None) -> str | None:
     organizations = payload.get("organizations") or []
     if organizations:
         first = organizations[0]
+        if isinstance(first, dict) and first.get("id"):
+            return str(first["id"])
         org = first.get("organization") if isinstance(first, dict) else None
         if org and org.get("id"):
             return str(org["id"])
     return None
+
+
+def _authenticate_with_core(*, user: User, password: str) -> dict | None:
+    try:
+        return core_auth_service.login(email=user.email, password=password)
+    except requests.HTTPError as login_error:
+        response = login_error.response
+        status_code = response.status_code if response is not None else None
+        if status_code == HTTPStatus.BAD_REQUEST:
+            return None
+        if status_code not in {HTTPStatus.FORBIDDEN, HTTPStatus.UNAUTHORIZED}:
+            raise
+
+    try:
+        return core_auth_service.register(
+            full_name=user.full_name,
+            email=user.email,
+            password=password,
+            phone=user.phone,
+        )
+    except requests.HTTPError as signup_error:
+        response = signup_error.response
+        status_code = response.status_code if response is not None else None
+        if status_code == HTTPStatus.BAD_REQUEST:
+            return None
+        if status_code in {HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT}:
+            raise ApiError("Nao foi possivel abrir sessao no Core para essa conta.", HTTPStatus.BAD_GATEWAY) from signup_error
+        raise

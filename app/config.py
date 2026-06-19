@@ -57,11 +57,15 @@ class Settings:
     MAX_CONTENT_LENGTH: int = int(_env_or_file("MAX_CONTENT_LENGTH", str(15 * 1024 * 1024)) or str(15 * 1024 * 1024))
     CORS_ORIGINS: list[str] = None  # type: ignore[assignment]
     CORE_API_URL: str | None = _env_or_file("CORE_API_URL")
+    CORE_HOST_HEADER: str | None = _env_or_file("CORE_HOST_HEADER")
     CORE_PROXY_MODE: str = _env_or_file("CORE_PROXY_MODE", "local") or "local"
     CORE_TIMEOUT_SECONDS: float = float(_env_or_file("CORE_TIMEOUT_SECONDS", "15") or "15")
     LOCAL_CORE_STATE_FILE: str = _env_or_file("LOCAL_CORE_STATE_FILE", "instance/local_core_state.json") or "instance/local_core_state.json"
-    APP_ID: str | None = _env_or_file("APP_ID", "3")
     APP_SLUG: str = _env_or_file("APP_SLUG", "fit-copilot") or "fit-copilot"
+    APP_ID: str | None = _env_or_file("APP_ID", APP_SLUG)
+    FRONTEND_URL: str = _env_or_file("FRONTEND_URL", "http://127.0.0.1:3000") or "http://127.0.0.1:3000"
+    APP_TIMEZONE: str = _env_or_file("APP_TIMEZONE", "America/Sao_Paulo") or "America/Sao_Paulo"
+    STUDENT_PORTAL_URL: str = _env_or_file("STUDENT_PORTAL_URL", "http://127.0.0.1:3000/aluno") or "http://127.0.0.1:3000/aluno"
     LOCAL_AI_API_KEY: str | None = _env_or_file("LOCAL_AI_API_KEY")
     LOCAL_AI_BASE_URL: str | None = _env_or_file("LOCAL_AI_BASE_URL")
     LOCAL_AI_MODEL_FAST: str = _env_or_file("LOCAL_AI_MODEL_FAST", "fitcopilot-fast") or "fitcopilot-fast"
@@ -69,14 +73,21 @@ class Settings:
     WHATSAPP_REQUESTED_BY_SERVICE: str = _env_or_file("WHATSAPP_REQUESTED_BY_SERVICE", "fitcopilot-backend") or "fitcopilot-backend"
     WHATSAPP_DEFAULT_COUNTRY_CODE: str = _env_or_file("WHATSAPP_DEFAULT_COUNTRY_CODE", "55") or "55"
     WHATSAPP_CHECKIN_HOUR: int = int(_env_or_file("WHATSAPP_CHECKIN_HOUR", "8") or "8")
+    WHATSAPP_DAILY_REPORT_HOUR: int = int(_env_or_file("WHATSAPP_DAILY_REPORT_HOUR", "20") or "20")
+    WWP_BOT_INTERNAL_URL: str | None = _env_or_file("WWP_BOT_INTERNAL_URL", "http://127.0.0.1:3333")
     WHATSAPP_QUIET_HOURS_START: int = int(_env_or_file("WHATSAPP_QUIET_HOURS_START", "21") or "21")
     WHATSAPP_QUIET_HOURS_END: int = int(_env_or_file("WHATSAPP_QUIET_HOURS_END", "7") or "7")
     BOT_INTERNAL_SECRET: str = _env_or_file("BOT_INTERNAL_SECRET", "fitcopilot-bot-dev-secret") or "fitcopilot-bot-dev-secret"
     OTP_RATE_LIMIT_PER_HOUR: int = int(_env_or_file("OTP_RATE_LIMIT_PER_HOUR", "5") or "5")
+    OTP_DEBUG_CODES_ENABLED: bool = (_env_or_file("OTP_DEBUG_CODES_ENABLED", "false") or "false").lower() in {"1", "true", "yes", "on"}
     PASSWORD_RESET_RATE_LIMIT_PER_HOUR: int = int(_env_or_file("PASSWORD_RESET_RATE_LIMIT_PER_HOUR", "5") or "5")
     BOT_RATE_LIMIT_PER_MINUTE: int = int(_env_or_file("BOT_RATE_LIMIT_PER_MINUTE", "60") or "60")
     API_HOST: str = _env_or_file("API_HOST", "127.0.0.1") or "127.0.0.1"
     API_PORT: int = int(_env_or_file("API_PORT", "5050") or "5050")
+    SENTRY_DSN: str | None = _env_or_file("SENTRY_DSN")
+    SENTRY_ENVIRONMENT: str = _env_or_file("SENTRY_ENVIRONMENT", "development") or "development"
+    SENTRY_TRACES_SAMPLE_RATE: float = float(_env_or_file("SENTRY_TRACES_SAMPLE_RATE", "0.1") or "0.1")
+    SENTRY_SEND_DEFAULT_PII: bool = (_env_or_file("SENTRY_SEND_DEFAULT_PII", "true") or "true").lower() in {"1", "true", "yes", "on"}
 
     def __post_init__(self) -> None:
         origins = os.getenv(
@@ -93,6 +104,7 @@ class TestSettings(Settings):
     CORE_PROXY_MODE: str = "disabled"
     STORAGE_PROVIDER: str = "local"
     AI_PROVIDER: str = "fake"
+    OTP_DEBUG_CODES_ENABLED: bool = True
     SECRET_KEY: str = "test-secret-fitcopilot-32-bytes-minimum"
     JWT_SECRET_KEY: str = "test-jwt-secret-fitcopilot-32-bytes-minimum"
     CORS_ORIGINS: list[str] = field(default_factory=lambda: ["http://localhost", "http://127.0.0.1"])

@@ -90,7 +90,7 @@ def create_student(*, account_id, professional_id, actor_user_id, data) -> Stude
     account = Account.query.filter_by(id=account_id, deleted_at=None).first()
     if account is None:
         raise ApiError("Conta não encontrada", HTTPStatus.NOT_FOUND)
-    total_students = StudentProfile.query.filter_by(account_id=account_id).count()
+    total_students = StudentProfile.query.filter_by(account_id=account_id, archived_at=None).count()
     if total_students >= account.max_students:
         raise ApiError("Limite de alunos da conta atingido", HTTPStatus.CONFLICT)
 
@@ -125,6 +125,15 @@ def create_student(*, account_id, professional_id, actor_user_id, data) -> Stude
         new_values={"full_name": student.full_name, "goal_type": student.goal_type},
     )
     db.session.commit()
+    if student.phone:
+        try:
+            from app.whatsapp.services import send_onboarding_message
+
+            send_onboarding_message(student=student, actor_user_id=actor_user_id, enqueue=False)
+        except Exception as exc:  # pragma: no cover - onboarding should not block student creation
+            from flask import current_app
+
+            current_app.logger.warning("student_auto_whatsapp_onboarding_failed student_id=%s error=%s", student.id, exc)
     return student
 
 
@@ -162,6 +171,93 @@ def archive_student(*, student: StudentProfile, actor_user_id) -> StudentProfile
     )
     db.session.commit()
     return student
+
+
+def delete_student(*, student: StudentProfile, actor_user_id) -> None:
+    from app.events.models import StudentEvent, StudentHealthScore
+    from app.files.models import StudentFile
+    from app.insights.models import AIInsight
+    from app.jobs.models import BackgroundJob
+    from app.messaging.models import SuggestedMessage
+    from app.operations.models import AutomationDecision
+    from app.reports.models import GeneratedReport
+    from app.students.portal_models import StudentLoginChallenge
+    from app.whatsapp.models import (
+        InboundMessageRecord,
+        OutboundMessageDispatch,
+        WhatsAppDeliveryStatusEvent,
+        WhatsAppSession,
+    )
+    from app.workouts.models import ExerciseLog, StudentWorkout, WorkoutDayExercise, WorkoutPlan, WorkoutPlanDay, WorkoutSession
+
+    student_id = student.id
+    account_id = student.account_id
+    user_id = student.user_id
+    old_values = {"full_name": student.full_name, "email": student.email, "phone": student.phone}
+
+    dispatch_ids = [row.id for row in OutboundMessageDispatch.query.filter_by(student_id=student_id).all()]
+    if dispatch_ids:
+        WhatsAppDeliveryStatusEvent.query.filter(
+            WhatsAppDeliveryStatusEvent.outbound_dispatch_id.in_(dispatch_ids)
+        ).delete(synchronize_session=False)
+
+    session_ids = [row.id for row in WorkoutSession.query.filter_by(student_id=student_id).all()]
+    if session_ids:
+        ExerciseLog.query.filter(ExerciseLog.session_id.in_(session_ids)).delete(synchronize_session=False)
+
+    plan_ids = [row.id for row in WorkoutPlan.query.filter_by(student_id=student_id).all()]
+    if plan_ids:
+        day_ids = [row.id for row in WorkoutPlanDay.query.filter(WorkoutPlanDay.workout_plan_id.in_(plan_ids)).all()]
+        if day_ids:
+            WorkoutDayExercise.query.filter(WorkoutDayExercise.workout_plan_day_id.in_(day_ids)).delete(
+                synchronize_session=False
+            )
+        WorkoutPlan.query.filter(WorkoutPlan.id.in_(plan_ids)).update(
+            {"previous_version_id": None},
+            synchronize_session=False,
+        )
+        WorkoutPlanDay.query.filter(WorkoutPlanDay.workout_plan_id.in_(plan_ids)).delete(synchronize_session=False)
+
+    for model in (
+        SuggestedMessage,
+        AutomationDecision,
+        StudentEvent,
+        StudentHealthScore,
+        StudentLoginChallenge,
+        WhatsAppSession,
+        OutboundMessageDispatch,
+        InboundMessageRecord,
+        GeneratedReport,
+        StudentFile,
+        WorkoutSession,
+        StudentWorkout,
+        WorkoutPlan,
+        StudentDailySignal,
+        StudentDailySummary,
+        StudentInteraction,
+        StudentHealthContext,
+    ):
+        model.query.filter_by(student_id=student_id).delete(synchronize_session=False)
+
+    AIInsight.query.filter_by(student_id=student_id).delete(synchronize_session=False)
+    BackgroundJob.query.filter_by(student_id=student_id).update({"student_id": None}, synchronize_session=False)
+
+    if user_id:
+        user = User.query.filter_by(id=user_id, role="student").first()
+        if user is not None:
+            db.session.delete(user)
+
+    db.session.delete(student)
+    db.session.flush()
+    create_audit_log(
+        account_id=account_id,
+        actor_user_id=actor_user_id,
+        entity_type="student_profile",
+        entity_id=student_id,
+        action="deleted",
+        old_values=old_values,
+    )
+    db.session.commit()
 
 
 def compute_student_score(student: StudentProfile) -> StudentScoreResult:
@@ -233,10 +329,14 @@ def recompute_student_score(student: StudentProfile) -> StudentProfile:
 
 def list_students_for_workspace(*, account_id, search: str | None = None, status: str | None = None) -> list[dict]:
     query = StudentProfile.query.filter_by(account_id=account_id)
+    if status == "archived":
+        query = query.filter(StudentProfile.archived_at.is_not(None))
+    else:
+        query = query.filter(StudentProfile.archived_at.is_(None))
     if search:
         like = f"%{search}%"
         query = query.filter(StudentProfile.full_name.ilike(like))
-    if status and status != "all":
+    if status and status not in {"all", "archived"}:
         mapped = {"silent": "no_signal"}.get(status, status)
         query = query.filter(StudentProfile.status == mapped)
     students = query.order_by(StudentProfile.full_name.asc()).all()

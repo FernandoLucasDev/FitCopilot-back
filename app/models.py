@@ -1,4 +1,4 @@
-from app.accounts.models import Account, ProfessionalProfile
+from app.accounts.models import Account, AccountMembership, ProfessionalProfile
 from app.auth.models import ProfessionalPasswordResetChallenge, User
 from app.files.models import StudentFile
 from app.insights.models import AIInsight
@@ -6,6 +6,12 @@ from app.jobs.models import AuditLog, BackgroundJob
 from app.messaging.models import SuggestedMessage
 from app.events.models import StudentEvent, StudentHealthScore
 from app.operations.models import AutomationDecision
+from app.physical.models import (
+    PhysicalAssessment,
+    PhysicalAssessmentAIRun,
+    PhysicalAssessmentComparison,
+    PhysicalAssessmentPhoto,
+)
 from app.reports.models import GeneratedReport
 from app.students.models import (
     StudentDailySignal,
@@ -26,6 +32,7 @@ from app.whatsapp.models import (
 
 __all__ = [
     "Account",
+    "AccountMembership",
     "ProfessionalProfile",
     "User",
     "ProfessionalPasswordResetChallenge",
@@ -52,6 +59,10 @@ __all__ = [
     "StudentEvent",
     "StudentHealthScore",
     "AutomationDecision",
+    "PhysicalAssessment",
+    "PhysicalAssessmentPhoto",
+    "PhysicalAssessmentAIRun",
+    "PhysicalAssessmentComparison",
     "GeneratedReport",
     "BackgroundJob",
     "AuditLog",

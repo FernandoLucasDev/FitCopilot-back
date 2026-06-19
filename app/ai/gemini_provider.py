@@ -8,7 +8,7 @@ from google import genai
 from google.genai import types as genai_types
 from pypdf import PdfReader
 
-from app.ai.base import AIProvider, DailySummaryResult, FileSummaryResult, MealAnalysisResult
+from app.ai.base import AIProvider, DailySummaryResult, FileSummaryResult, MealAnalysisResult, MediaSafetyResult
 from app.ai.fake_provider import FakeAIProvider
 
 
@@ -184,6 +184,73 @@ Contexto JSON:
             fats_grams=payload.get("fats_grams") if payload.get("fats_grams") is not None else fallback.fats_grams,
             summary_text=payload.get("summary_text") or fallback.summary_text,
             guidance_text=payload.get("guidance_text") or fallback.guidance_text,
+        )
+
+    def moderate_media(self, *, content: bytes, mime_type: str, context: dict) -> MediaSafetyResult:
+        if not self._client:
+            return self._fallback.moderate_media(content=content, mime_type=mime_type, context=context)
+
+        prompt = f"""
+Voce e uma camada de seguranca do FitCopilot antes da IA principal.
+Classifique a imagem recebida no WhatsApp sem descrever detalhes explicitos.
+
+Retorne JSON valido com:
+- category: uma de safe_food, safe_body_progress, non_relevant, adult_nudity, sexual_content, violence, suspected_minor, unknown
+- severity: allow, warn, block, critical
+- allowed: boolean
+- confidence: numero entre 0 e 1
+- user_message: mensagem curta em portugues para o aluno quando allowed=false
+
+Regras:
+- Nudez, genitalia, conteudo sexual ou imagem intima: allowed=false, category adult_nudity ou sexual_content.
+- Qualquer suspeita de menor em contexto sexual/intimo: allowed=false, severity=critical, category suspected_minor.
+- Violencia/gore: allowed=false.
+- Foto de refeicao: allowed=true, category safe_food.
+- Foto de evolucao corporal sem nudez e sem sexualizacao: allowed=true, category safe_body_progress.
+- Imagem segura mas fora de refeicao/treino/evolucao: allowed=false, category non_relevant.
+- Se houver duvida, bloqueie.
+- Nao use linguagem moralista. Nao descreva o conteudo explicito.
+
+Contexto JSON:
+{json.dumps(context, ensure_ascii=False, default=str)}
+"""
+        try:
+            response = self._client.models.generate_content(
+                model=self.fast_model,
+                contents=[
+                    genai_types.Part.from_bytes(data=content, mime_type=mime_type),
+                    prompt,
+                ],
+                config=genai_types.GenerateContentConfig(
+                    temperature=0,
+                    response_mime_type="application/json",
+                ),
+            )
+            payload = _safe_json_loads(response.text or "{}", {})
+        except Exception:
+            return self._fallback.moderate_media(content=content, mime_type=mime_type, context=context)
+
+        category = str(payload.get("category") or "unknown")
+        severity = str(payload.get("severity") or "block")
+        allowed = bool(payload.get("allowed") is True and severity in {"allow", "warn"} and category in {"safe_food", "safe_body_progress"})
+        if not allowed and category in {"safe_food", "safe_body_progress"}:
+            category = "unknown"
+            severity = "block"
+        user_message = str(
+            payload.get("user_message")
+            or "Não consigo analisar esse tipo de imagem por aqui. Pode me mandar uma foto de refeição, treino, evolução física ou uma descrição em texto."
+        )
+        confidence = payload.get("confidence")
+        try:
+            confidence = float(confidence) if confidence is not None else None
+        except Exception:
+            confidence = None
+        return MediaSafetyResult(
+            allowed=allowed,
+            category=category,
+            severity=severity,
+            user_message=user_message,
+            confidence=confidence,
         )
 
     def generate_workout_insight(self, *, context: dict) -> str:

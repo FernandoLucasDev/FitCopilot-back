@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import Integer, String
+from datetime import datetime
+
+from sqlalchemy import DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -46,3 +48,26 @@ class ProfessionalProfile(UUIDPrimaryKeyMixin, TimestampMixin, db.Model):
     account = relationship("Account", back_populates="professionals")
     user = relationship("User", back_populates="professional_profile")
     students = relationship("StudentProfile", back_populates="primary_professional")
+
+
+class AccountMembership(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, db.Model):
+    __tablename__ = "account_memberships"
+    __table_args__ = (
+        UniqueConstraint("account_id", "user_id", name="uq_account_memberships_account_user"),
+        db.Index("ix_account_memberships_invite_token", "invite_token"),
+        db.Index("ix_account_memberships_invited_email", "invited_email"),
+    )
+
+    account_id: Mapped[str] = mapped_column(db.ForeignKey("accounts.id"), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(db.ForeignKey("users.id"), nullable=True, index=True)
+    external_org_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    external_member_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    role: Mapped[str] = mapped_column(String(30), nullable=False, default="TRAINER", index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="ACTIVE", index=True)
+    invited_email: Mapped[str | None] = mapped_column(String(255))
+    invited_by_user_id: Mapped[str | None] = mapped_column(db.ForeignKey("users.id"), nullable=True, index=True)
+    invite_token: Mapped[str | None] = mapped_column(String(160), unique=True)
+    invite_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    can_manage_billing: Mapped[bool] = mapped_column(nullable=False, default=False)
+    permissions_json: Mapped[dict] = mapped_column(JSONB().with_variant(db.JSON(), "sqlite"), nullable=False, default=dict)

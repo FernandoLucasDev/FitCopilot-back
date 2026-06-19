@@ -9,12 +9,14 @@ from app.students.services import require_student
 from app.workouts.schemas import AssignWorkoutInput, CreateWorkoutPlanInput, CreateWorkoutSessionInput, UpdateWorkoutPlanInput
 from app.workouts.services import (
     activate_workout_plan,
+    archive_workout_plan,
     assign_workout_to_student,
     create_workout_plan,
     create_workout_session,
     get_active_assignment,
     get_active_workout_for_student,
     list_student_sessions,
+    list_student_workout_plans,
     list_workout_plans,
     require_workout_plan,
     serialize_student_workout,
@@ -96,6 +98,13 @@ def get_student_workout(student_id):
     return success_response({"workoutPlan": serialize_workout_plan(get_active_workout_for_student(student_id))})
 
 
+@workouts_bp.get("/students/<uuid:student_id>/workout-plans")
+@require_auth()
+def get_student_workouts(student_id):
+    auth = current_auth()
+    return success_response({"items": list_student_workout_plans(account_id=auth.account_id, student_id=student_id)})
+
+
 @workouts_bp.post("/students/<uuid:student_id>/workout-plans")
 @require_auth({"owner", "professional", "admin"})
 def post_student_workout_plan(student_id):
@@ -120,3 +129,11 @@ def activate_plan(plan_id):
     auth = current_auth()
     plan = require_workout_plan(auth.account_id, plan_id)
     return success_response({"workoutPlan": serialize_workout_plan(activate_workout_plan(plan=plan, actor_user_id=auth.user.id))})
+
+
+@workouts_bp.post("/workout-plans/<uuid:plan_id>/archive")
+@require_auth({"owner", "professional", "admin"})
+def archive_plan(plan_id):
+    auth = current_auth()
+    plan = require_workout_plan(auth.account_id, plan_id)
+    return success_response({"workoutPlan": serialize_workout_plan(archive_workout_plan(plan=plan, actor_user_id=auth.user.id))})

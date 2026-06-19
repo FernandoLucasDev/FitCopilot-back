@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.ai.base import AIProvider, DailySummaryResult, FileSummaryResult, MealAnalysisResult
+from app.ai.base import AIProvider, DailySummaryResult, FileSummaryResult, MealAnalysisResult, MediaSafetyResult
 
 
 class FakeAIProvider(AIProvider):
@@ -55,7 +55,22 @@ class FakeAIProvider(AIProvider):
         protein = 28
         carbs = 42
         fats = 14
-        if "banana" in lower or "aveia" in lower:
+        if "2 ovos" in lower or "dois ovos" in lower:
+            estimated_calories = 160
+            protein = 13
+            carbs = 1
+            fats = 11
+        elif "bolo" in lower or "chocolate" in lower:
+            estimated_calories = 380
+            protein = 5
+            carbs = 52
+            fats = 17
+        elif "misto quente" in lower or ("presunto" in lower and "queijo" in lower):
+            estimated_calories = 360
+            protein = 20
+            carbs = 32
+            fats = 17
+        elif "banana" in lower or "aveia" in lower:
             estimated_calories = 320
             protein = 12
             carbs = 48
@@ -74,6 +89,14 @@ class FakeAIProvider(AIProvider):
             protein = 42
             carbs = 88
             fats = 34
+        elif (
+            ("arroz" in lower and "feij" in lower)
+            and ("carne" in lower or "bolinha" in lower or "almond" in lower)
+        ):
+            estimated_calories = 825 if "2 prato" in lower or "dois prato" in lower else 620
+            protein = 38
+            carbs = 100 if estimated_calories > 700 else 72
+            fats = 28
         return MealAnalysisResult(
             estimated_calories=estimated_calories,
             protein_grams=protein,
@@ -81,6 +104,15 @@ class FakeAIProvider(AIProvider):
             fats_grams=fats,
             summary_text=f"Registrei sua refeição com cerca de {estimated_calories} kcal.",
             guidance_text="Se conseguir, mantenha boa hidratação e siga a próxima refeição sem pular. 💧",
+        )
+
+    def moderate_media(self, *, content: bytes, mime_type: str, context: dict) -> MediaSafetyResult:
+        return MediaSafetyResult(
+            allowed=False,
+            category="unknown",
+            severity="block",
+            user_message="Não consegui validar essa imagem com segurança. Me descreve em texto que eu registro por aqui.",
+            confidence=0.0,
         )
 
     def generate_workout_insight(self, *, context: dict) -> str:

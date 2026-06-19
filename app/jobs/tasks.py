@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+import re
 
 from app.extensions import celery_app, db
 from app.files.models import StudentFile
@@ -12,7 +13,16 @@ from app.students.models import StudentDailySummary, StudentInteraction, Student
 from app.students.services import compute_student_score
 from app.insights.models import AIInsight
 from app.whatsapp.models import InboundMessageRecord, OutboundMessageDispatch
-from app.whatsapp.services import perform_dispatch, process_inbound_message, send_daily_checkin, send_manual_whatsapp_message, send_workout_of_day
+from app.whatsapp.services import (
+    get_or_create_student_automations,
+    perform_dispatch,
+    process_inbound_message,
+    send_daily_checkin,
+    send_end_of_day_report,
+    send_manual_whatsapp_message,
+    send_workout_of_day,
+    check_pending_workout_sessions,
+)
 
 
 def utcnow() -> datetime:
@@ -258,14 +268,131 @@ def generate_student_report_job(report_id: str):
         }
     )
     storage = current_app.extensions["storage_provider"]
-    content = report.summary_text.encode("utf-8")
-    stored = storage.save(f"accounts/{report.account_id}/reports", f"{report.report_type}.txt", content, "text/plain")
+    pdf_content = _build_student_report_pdf(
+        title=f"Relatorio FitCopilot - {student.full_name}",
+        subtitle=f"{report.report_type} | {report.period_start.isoformat() if report.period_start else 'inicio'} a {report.period_end.isoformat() if report.period_end else 'hoje'}",
+        sections=[
+            ("Resumo inteligente", report.summary_text or "Relatorio gerado sem resumo disponivel."),
+            ("Treinos recentes", _format_workout_sessions_for_report(workout_sessions)),
+            ("Arquivos usados", _format_files_for_report(recent_files)),
+        ],
+    )
+    stored = storage.save(f"accounts/{report.account_id}/reports", f"{report.report_type}.pdf", pdf_content, "application/pdf")
     report.storage_key = stored.storage_key
     report.file_url = stored.file_url
     report.status = "completed"
     report.completed_at = utcnow()
     db.session.commit()
     return {"status": "completed", "report_id": report_id}
+
+
+def _format_workout_sessions_for_report(workout_sessions: list[dict]) -> str:
+    if not workout_sessions:
+        return "Nenhum treino registrado no periodo."
+    lines = []
+    for item in workout_sessions[:8]:
+        exercises = item.get("exercises") or []
+        lines.append(f"{item.get('date')} - {item.get('status')} - {len(exercises)} exercicios")
+        for exercise in exercises[:5]:
+            detail = " ".join(
+                part
+                for part in [
+                    exercise.get("exercise_name"),
+                    f"{exercise.get('sets_completed')} series" if exercise.get("sets_completed") else None,
+                    exercise.get("reps_completed"),
+                ]
+                if part
+            )
+            if detail:
+                lines.append(f"  - {detail}")
+    return "\n".join(lines)
+
+
+def _format_files_for_report(files: list[dict]) -> str:
+    if not files:
+        return "Nenhum arquivo processado usado como contexto."
+    lines = []
+    for item in files:
+        lines.append(f"{item.get('title')} ({item.get('category')})")
+        if item.get("summary"):
+            lines.append(f"  {item.get('summary')}")
+    return "\n".join(lines)
+
+
+def _pdf_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _wrap_pdf_text(text: str, max_chars: int = 92) -> list[str]:
+    clean = re.sub(r"\s+", " ", text).strip()
+    if not clean:
+        return [""]
+    words = clean.split(" ")
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) > max_chars and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _build_student_report_pdf(*, title: str, subtitle: str, sections: list[tuple[str, str]]) -> bytes:
+    lines: list[tuple[str, int]] = [(title, 18), (subtitle, 10), ("", 10)]
+    for heading, body in sections:
+        lines.append((heading, 14))
+        for paragraph in str(body).splitlines():
+            for wrapped in _wrap_pdf_text(paragraph):
+                lines.append((wrapped, 10))
+        lines.append(("", 10))
+    if len(lines) > 46:
+        lines = lines[:45] + [("Conteudo completo armazenado no resumo do relatorio no FitCopilot.", 10)]
+
+    page_height = 792
+    margin_x = 54
+    y = 740
+    content_parts = ["BT", f"{margin_x} {y} Td"]
+    previous_size = 10
+    for line, size in lines:
+        leading = 24 if size >= 14 else 15
+        if size != previous_size:
+            content_parts.append(f"/F1 {size} Tf")
+            previous_size = size
+        if line:
+            content_parts.append(f"({_pdf_escape(line)}) Tj")
+        content_parts.append(f"0 -{leading} Td")
+        y -= leading
+    content_parts.append("ET")
+    content = "\n".join(content_parts).encode("latin-1", errors="replace")
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{index} 0 obj\n".encode("ascii"))
+        pdf.extend(obj)
+        pdf.extend(b"\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+    )
+    return bytes(pdf)
 
 
 @celery_app.task(name="recompute_student_score_job")
@@ -281,6 +408,15 @@ def recompute_student_score_job(student_id: str):
     student.last_signal_summary = score.insight
     db.session.commit()
     return {"status": "completed", "score": score.score}
+
+
+@celery_app.task(name="generate_physical_assessment_insights_job")
+def generate_physical_assessment_insights_job(assessment_id: str):
+    from app.physical.services import generate_physical_assessment_insights, serialize_assessment
+
+    assessment = generate_physical_assessment_insights(assessment_id)
+    db.session.commit()
+    return {"status": "completed", "assessment": serialize_assessment(assessment)}
 
 
 @celery_app.task(name="generate_message_suggestion_job")
@@ -320,6 +456,49 @@ def send_workout_of_day_job(student_id: str, workout_plan_id: str | None = None)
         return {"status": "missing"}
     dispatch = send_workout_of_day(student=student, actor_user_id=student.primary_professional.user_id if student.primary_professional else None)
     return {"status": "completed", "dispatch_id": str(dispatch.id), "workout_plan_id": workout_plan_id}
+
+
+@celery_app.task(name="check_pending_workout_sessions_job")
+def check_pending_workout_sessions_job():
+    return check_pending_workout_sessions()
+
+
+@celery_app.task(name="send_end_of_day_report_job")
+def send_end_of_day_report_job(student_id: str, summary_date: str | None = None):
+    student = StudentProfile.query.filter_by(id=student_id).first()
+    if student is None:
+        return {"status": "missing"}
+    target_date = date.fromisoformat(summary_date) if summary_date else date.today()
+    dispatch = send_end_of_day_report(
+        student=student,
+        actor_user_id=student.primary_professional.user_id if student.primary_professional else None,
+        summary_date=target_date,
+    )
+    return {"status": "completed", "dispatch_id": str(dispatch.id), "summary_date": target_date.isoformat()}
+
+
+@celery_app.task(name="send_end_of_day_reports_job")
+def send_end_of_day_reports_job(summary_date: str | None = None):
+    target_date = date.fromisoformat(summary_date) if summary_date else date.today()
+    students = StudentProfile.query.filter_by(archived_at=None).all()
+    sent = []
+    skipped = []
+    for student in students:
+        rules = {rule.rule_type: rule for rule in get_or_create_student_automations(student)}
+        daily_report = rules.get("daily_report")
+        if daily_report and not daily_report.is_active:
+            skipped.append({"student_id": str(student.id), "reason": "automation_disabled"})
+            continue
+        if not student.phone:
+            skipped.append({"student_id": str(student.id), "reason": "missing_phone"})
+            continue
+        dispatch = send_end_of_day_report(
+            student=student,
+            actor_user_id=student.primary_professional.user_id if student.primary_professional else None,
+            summary_date=target_date,
+        )
+        sent.append({"student_id": str(student.id), "dispatch_id": str(dispatch.id)})
+    return {"status": "completed", "summary_date": target_date.isoformat(), "sent": sent, "skipped": skipped}
 
 
 @celery_app.task(name="send_reengagement_message_job")

@@ -26,6 +26,9 @@ class CoreClient:
             "Content-Type": "application/json",
             "X-App-ID": self._app_header(),
         }
+        host_header = current_app.config.get("CORE_HOST_HEADER")
+        if host_header:
+            headers["Host"] = str(host_header)
         if token:
             headers["Authorization"] = f"Bearer {token}"
         if org_id:

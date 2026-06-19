@@ -15,6 +15,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY . .
 
+RUN addgroup --system app && adduser --system --ingroup app app \
+    && chown -R app:app /app
+USER app
+
 EXPOSE 5050
 
-CMD ["sh", "-c", "python scripts/bootstrap_dev.py && python run.py"]
+CMD ["sh", "-c", "gunicorn 'app:create_app()' --bind 0.0.0.0:${API_PORT:-5050} --workers ${GUNICORN_WORKERS:-4} --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-120} --access-logfile - --error-logfile -"]

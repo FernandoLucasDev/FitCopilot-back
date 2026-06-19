@@ -26,7 +26,8 @@ def billing_plans():
 def billing_subscription():
     auth = current_auth()
     org_id = request.headers.get("X-ORG-ID") or (auth.user.account.external_org_id if auth.user.account else None)
-    return success_response(billing_gateway.get_subscription(token=_core_token(), org_id=org_id))
+    plan_code = auth.user.account.current_plan_code if auth.user.account else None
+    return success_response(billing_gateway.get_subscription(token=_core_token(), org_id=org_id, plan_code=plan_code))
 
 
 @billing_bp.get("/billing/entitlements/me")
@@ -34,7 +35,14 @@ def billing_subscription():
 def billing_entitlements():
     auth = current_auth()
     org_id = request.headers.get("X-ORG-ID") or (auth.user.account.external_org_id if auth.user.account else None)
-    return success_response(billing_gateway.get_entitlements(token=_core_token(), org_id=org_id))
+    plan_code = auth.user.account.current_plan_code if auth.user.account else None
+    return success_response(billing_gateway.get_entitlements(token=_core_token(), org_id=org_id, plan_code=plan_code))
+
+
+@billing_bp.get("/billing/checkout-config")
+@require_auth({"owner", "professional", "admin"})
+def billing_checkout_config():
+    return success_response(billing_gateway.get_checkout_config(token=_core_token()))
 
 
 @billing_bp.post("/billing/checkout-session")
@@ -49,6 +57,8 @@ def billing_checkout():
         success_url=payload.get("success_url") or "http://localhost:3000/planos?ok=1",
         cancel_url=payload.get("cancel_url") or "http://localhost:3000/planos?cancel=1",
         org_id=org_id,
+        presentation=payload.get("presentation") or "hosted",
+        return_url=payload.get("return_url"),
     )
     return success_response(result)
 
@@ -62,5 +72,22 @@ def billing_portal():
         token=_core_token(),
         org_id=org_id,
         return_url=(request.get_json() or {}).get("return_url") or "http://localhost:3000/planos",
+    )
+    return success_response(result)
+
+
+@billing_bp.post("/billing/setup-intent")
+@require_auth({"owner", "professional", "admin"})
+def billing_setup_intent():
+    return success_response(billing_gateway.create_setup_intent(token=_core_token()))
+
+
+@billing_bp.post("/billing/setup-intent/confirm")
+@require_auth({"owner", "professional", "admin"})
+def billing_confirm_setup_intent():
+    payload = request.get_json() or {}
+    result = billing_gateway.confirm_setup_intent(
+        token=_core_token(),
+        setup_intent_id=str(payload.get("setup_intent_id") or ""),
     )
     return success_response(result)
