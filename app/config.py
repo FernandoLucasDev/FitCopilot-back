@@ -41,6 +41,7 @@ class Settings:
     SQLALCHEMY_DATABASE_URI: str = _env_or_file("DATABASE_URL", _sqlite_fallback()) or _sqlite_fallback()
     SQLALCHEMY_TRACK_MODIFICATIONS: bool = False
     REDIS_URL: str = _env_or_file("REDIS_URL", "redis://localhost:6379/0") or "redis://localhost:6379/0"
+    CELERY_TASK_DEFAULT_QUEUE: str = _env_or_file("CELERY_TASK_DEFAULT_QUEUE", "fitcopilot") or "fitcopilot"
     STORAGE_PROVIDER: str = _env_or_file("STORAGE_PROVIDER", "local") or "local"
     STORAGE_LOCAL_ROOT: str = _env_or_file("STORAGE_LOCAL_ROOT", "storage") or "storage"
     STORAGE_PUBLIC_BASE_URL: str = _env_or_file("STORAGE_PUBLIC_BASE_URL", "http://localhost:5000") or "http://localhost:5000"

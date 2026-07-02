@@ -141,6 +141,7 @@ def configure_celery(app: Flask) -> None:
     celery_app.conf.update(
         broker_url=app.config["REDIS_URL"],
         result_backend=app.config["REDIS_URL"],
+        task_default_queue=app.config.get("CELERY_TASK_DEFAULT_QUEUE", "fitcopilot"),
         task_ignore_result=False,
         timezone=app.config.get("APP_TIMEZONE", "America/Sao_Paulo"),
         beat_schedule={
