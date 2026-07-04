@@ -18,6 +18,7 @@ from app.auth.core_auth_service import core_auth_service
 from app.integrations.core_email import core_email_gateway
 from app.jobs.models import AuditLog
 from app.auth.models import User
+from app.whatsapp.services import apply_core_delivery_status, observe_core_inbound_message
 
 
 ai_bp = Blueprint("ai", __name__)
@@ -76,12 +77,42 @@ def bot_whatsapp_respond():
         raise ApiError("Acesso interno invalido.", HTTPStatus.UNAUTHORIZED)
 
     payload = request.get_json() or {}
+    metadata = payload.get("metadata") or {}
+    _, duplicate = observe_core_inbound_message(
+        phone_number=payload.get("phoneNumber"),
+        text=payload.get("text"),
+        message_type=payload.get("messageType", "text"),
+        metadata=metadata,
+    )
+    if duplicate:
+        return success_response(
+            {
+                "handled": True,
+                "replyText": "",
+                "nextPhase": payload.get("phase", "idle"),
+                "metadataPatch": {},
+                "duplicate": True,
+            }
+        )
+    media_safety = metadata.get("mediaSafety") or {}
+    if media_safety and not bool(media_safety.get("allowed")):
+        return success_response(
+            {
+                "handled": True,
+                "replyText": str(media_safety.get("userMessage") or "Não consigo analisar essa imagem por aqui. Pode me enviar uma descrição em texto?"),
+                "nextPhase": payload.get("phase", "idle"),
+                "metadataPatch": {},
+                "studentId": None,
+                "studentName": None,
+                "mediaBlocked": True,
+            }
+        )
     reply = reply_for_whatsapp(
         phone_number=payload.get("phoneNumber"),
         text=payload.get("text"),
         message_type=payload.get("messageType", "text"),
         state_phase=payload.get("phase", "idle"),
-        metadata=payload.get("metadata") or {},
+        metadata=metadata,
     )
     return success_response(
         {
@@ -91,6 +122,31 @@ def bot_whatsapp_respond():
             "metadataPatch": reply.metadata_patch or {},
             "studentId": reply.student_id,
             "studentName": reply.student_name,
+        }
+    )
+
+
+@ai_bp.post("/internal/bot/whatsapp/status")
+def bot_whatsapp_status():
+    check_rate_limit(
+        key=f"internal-bot-status:{client_ip()}",
+        limit=240,
+        window_seconds=60,
+    )
+    bot_secret = request.headers.get("X-Bot-Secret")
+    expected_secret = current_app.config.get("BOT_INTERNAL_SECRET")
+    if not bot_secret or bot_secret != expected_secret:
+        raise ApiError("Acesso interno invalido.", HTTPStatus.UNAUTHORIZED)
+
+    payload = request.get_json() or {}
+    dispatch, changed = apply_core_delivery_status(payload)
+    if dispatch.local_status == "failed":
+        _capture_whatsapp_delivery_failure_sentry(payload=payload, dispatch_id=str(dispatch.id))
+    return success_response(
+        {
+            "dispatchId": str(dispatch.id),
+            "status": dispatch.local_status,
+            "changed": changed,
         }
     )
 
@@ -243,6 +299,32 @@ def _capture_whatsapp_connection_sentry(*, instance_name: str, status: str, reas
             sentry_sdk.capture_message(f"WhatsApp session lost: {instance_name} ({status})", level="error")
     except Exception as exc:  # pragma: no cover - observability must never break the alert route.
         current_app.logger.warning("whatsapp_connection_sentry_capture_failed error=%s", exc)
+
+
+def _capture_whatsapp_delivery_failure_sentry(*, payload: dict, dispatch_id: str) -> None:
+    current_app.logger.error(
+        "whatsapp_delivery_failed dispatch_id=%s core_message_id=%s code=%s error=%s",
+        dispatch_id,
+        payload.get("coreMessagePublicId"),
+        payload.get("providerErrorCode"),
+        payload.get("providerErrorMessage"),
+    )
+    try:
+        import sentry_sdk
+
+        with sentry_sdk.configure_scope() as scope:
+            scope.set_context(
+                "whatsapp_delivery",
+                {
+                    "dispatchId": dispatch_id,
+                    "coreMessagePublicId": payload.get("coreMessagePublicId"),
+                    "providerErrorCode": payload.get("providerErrorCode"),
+                    "providerErrorMessage": payload.get("providerErrorMessage"),
+                },
+            )
+            sentry_sdk.capture_message("WhatsApp delivery failed", level="error")
+    except Exception as exc:  # pragma: no cover
+        current_app.logger.warning("whatsapp_delivery_sentry_capture_failed error=%s", exc)
 
 
 def _capture_media_safety_sentry(*, phone_number, message_id, category: str, severity: str) -> None:

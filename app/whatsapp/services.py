@@ -45,6 +45,18 @@ def normalize_phone(phone: str | None) -> str | None:
     return digits
 
 
+def phone_variants(phone: str | None) -> list[str]:
+    normalized = normalize_phone(phone)
+    if not normalized:
+        return []
+    variants = [normalized]
+    if normalized.startswith("55") and len(normalized) == 13 and normalized[4:5] == "9":
+        variants.append(f"{normalized[:4]}{normalized[5:]}")
+    elif normalized.startswith("55") and len(normalized) == 12:
+        variants.append(f"{normalized[:4]}9{normalized[4:]}")
+    return list(dict.fromkeys(variants))
+
+
 def _owner_context(student: StudentProfile) -> tuple[str, str | None]:
     owner = student.account.users[0] if student.account and student.account.users else None
     token = owner.core_access_token if owner else None
@@ -819,69 +831,40 @@ def perform_dispatch(dispatch_id: str) -> OutboundMessageDispatch:
 
     payload = dispatch.payload_json or {}
     message_type = payload.get("message_type", "text")
+    provider_mode = str(current_app.config.get("WHATSAPP_PROVIDER_MODE", "core") or "core").strip().lower()
+    if provider_mode not in {"core", "evolution", "core_with_evolution_fallback"}:
+        raise RuntimeError(f"WHATSAPP_PROVIDER_MODE invalido: {provider_mode}")
     try:
-        token, org_id = _owner_context(student)
-        if message_type == "interactive":
-            response = core_messaging_client.send_interactive_message(
-                token=token,
-                to_phone=phone,
-                body=payload.get("interactive", {}).get("body", ""),
-                buttons=payload.get("interactive", {}).get("buttons", []),
-                idempotency_key=dispatch.idempotency_key,
-                external_reference=dispatch.external_reference,
-                requested_by_service=dispatch.requested_by_service,
-                org_id=org_id,
-            )
-        elif message_type == "media":
-            media = payload.get("media", {})
-            response = core_messaging_client.send_media_message(
-                token=token,
-                to_phone=phone,
-                media_url=media.get("link", ""),
-                media_type=media.get("type", "document"),
-                caption=media.get("caption"),
-                idempotency_key=dispatch.idempotency_key,
-                external_reference=dispatch.external_reference,
-                requested_by_service=dispatch.requested_by_service,
-                org_id=org_id,
-            )
-        elif message_type == "template":
-            template = payload.get("template", {})
-            response = core_messaging_client.send_template_message(
-                token=token,
-                to_phone=phone,
-                template_name=template.get("name", ""),
-                language_code=template.get("language_code", "pt_BR"),
-                components=template.get("components", []),
-                idempotency_key=dispatch.idempotency_key,
-                external_reference=dispatch.external_reference,
-                requested_by_service=dispatch.requested_by_service,
-                org_id=org_id,
-            )
+        if provider_mode == "evolution":
+            response = _send_dispatch_via_local_bot(dispatch=dispatch, student=student, phone=phone, payload=payload)
         else:
-            response = core_messaging_client.send_text_message(
-                token=token,
-                to_phone=phone,
-                body=payload.get("text", {}).get("body", ""),
-                idempotency_key=dispatch.idempotency_key,
-                external_reference=dispatch.external_reference,
-                requested_by_service=dispatch.requested_by_service,
-                org_id=org_id,
+            response = _send_dispatch_via_core(
+                dispatch=dispatch,
+                student=student,
+                phone=phone,
+                payload=payload,
+                message_type=message_type,
             )
     except Exception as exc:
-        current_app.logger.warning("core_whatsapp_dispatch_failed_using_local_bot dispatch_id=%s error=%s", dispatch.id, exc)
+        if provider_mode != "core_with_evolution_fallback":
+            raise
+        current_app.logger.warning(
+            "core_whatsapp_dispatch_failed_using_explicit_evolution_fallback dispatch_id=%s error=%s",
+            dispatch.id,
+            exc,
+        )
         response = _send_dispatch_via_local_bot(dispatch=dispatch, student=student, phone=phone, payload=payload)
 
     dispatch.core_message_public_id = str(response.get("public_id") or response.get("id") or "")
     dispatch.core_channel_account_id = str(response.get("channel_account_id") or response.get("channelAccountId") or "") or None
-    dispatch.local_status = "sent"
+    dispatch.local_status = str(response.get("status") or "accepted").lower()
     db.session.add(
         StudentInteraction(
             account_id=student.account_id,
             student_id=student.id,
             interaction_type="outgoing_message",
             channel="whatsapp",
-            title=f"WhatsApp enviado: {dispatch.message_category}",
+            title=f"WhatsApp aceito: {dispatch.message_category}",
             body=payload.get("text", {}).get("body") or payload.get("interactive", {}).get("body"),
             created_by_user_id=student.primary_professional.user_id if student.primary_professional else None,
             interaction_at=utcnow(),
@@ -891,31 +874,131 @@ def perform_dispatch(dispatch_id: str) -> OutboundMessageDispatch:
     emit_event(
         account_id=student.account_id,
         student_id=student.id,
-        event_type="message_sent",
+        event_type="message_accepted",
         source="whatsapp",
-        title=f"WhatsApp enviado: {dispatch.message_category}",
+        title=f"WhatsApp aceito para envio: {dispatch.message_category}",
         body=payload.get("text", {}).get("body") or payload.get("interactive", {}).get("body"),
-        event_key=f"whatsapp_dispatch_sent:{dispatch.id}",
+        event_key=f"whatsapp_dispatch_accepted:{dispatch.id}",
         payload={"dispatch_id": str(dispatch.id), "category": dispatch.message_category},
     )
     db.session.commit()
     return dispatch
 
 
-def record_delivery_event(*, dispatch: OutboundMessageDispatch, event_type: str, payload: dict) -> OutboundMessageDispatch:
-    status_map = {"sent": "sent", "delivered": "delivered", "read": "read", "failed": "failed"}
-    dispatch.local_status = status_map.get(event_type, dispatch.local_status)
-    db.session.add(
-        WhatsAppDeliveryStatusEvent(
-            outbound_dispatch_id=dispatch.id,
-            core_message_public_id=dispatch.core_message_public_id,
-            event_type=event_type,
-            event_payload_json=payload,
-            created_at=utcnow(),
+def _send_dispatch_via_core(
+    *,
+    dispatch: OutboundMessageDispatch,
+    student: StudentProfile,
+    phone: str,
+    payload: dict,
+    message_type: str,
+) -> dict:
+    token, org_id = _owner_context(student)
+    if message_type == "interactive":
+        return core_messaging_client.send_interactive_message(
+                token=token,
+                to_phone=phone,
+                body=payload.get("interactive", {}).get("body", ""),
+                buttons=payload.get("interactive", {}).get("buttons", []),
+                idempotency_key=dispatch.idempotency_key,
+                external_reference=dispatch.external_reference,
+                requested_by_service=dispatch.requested_by_service,
+                org_id=org_id,
         )
+    if message_type == "media":
+        media = payload.get("media", {})
+        return core_messaging_client.send_media_message(
+                token=token,
+                to_phone=phone,
+                media_url=media.get("link", ""),
+                media_type=media.get("type", "document"),
+                caption=media.get("caption"),
+                idempotency_key=dispatch.idempotency_key,
+                external_reference=dispatch.external_reference,
+                requested_by_service=dispatch.requested_by_service,
+                org_id=org_id,
+        )
+    if message_type == "template":
+        template = payload.get("template", {})
+        return core_messaging_client.send_template_message(
+                token=token,
+                to_phone=phone,
+                template_name=template.get("name", ""),
+                language_code=template.get("language_code", "pt_BR"),
+                components=template.get("components", []),
+                idempotency_key=dispatch.idempotency_key,
+                external_reference=dispatch.external_reference,
+                requested_by_service=dispatch.requested_by_service,
+                org_id=org_id,
+        )
+    return core_messaging_client.send_text_message(
+        token=token,
+        to_phone=phone,
+        body=payload.get("text", {}).get("body", ""),
+        idempotency_key=dispatch.idempotency_key,
+        external_reference=dispatch.external_reference,
+        requested_by_service=dispatch.requested_by_service,
+        org_id=org_id,
     )
+
+
+def record_delivery_event(*, dispatch: OutboundMessageDispatch, event_type: str, payload: dict) -> OutboundMessageDispatch:
+    event_type = (event_type or "").strip().lower()
+    status_map = {
+        "queued": "queued",
+        "processing": "processing",
+        "accepted": "accepted",
+        "sent": "sent",
+        "delivered": "delivered",
+        "read": "read",
+        "failed": "failed",
+    }
+    dispatch.local_status = status_map.get(event_type, dispatch.local_status)
+    provider_event_id = str(payload.get("providerEventId") or "").strip()
+    existing = WhatsAppDeliveryStatusEvent.query.filter_by(
+        outbound_dispatch_id=dispatch.id,
+        event_type=event_type,
+    ).order_by(WhatsAppDeliveryStatusEvent.created_at.desc()).first()
+    existing_provider_event_id = str((existing.event_payload_json or {}).get("providerEventId") or "") if existing else ""
+    if existing is None or (provider_event_id and provider_event_id != existing_provider_event_id):
+        db.session.add(
+            WhatsAppDeliveryStatusEvent(
+                outbound_dispatch_id=dispatch.id,
+                core_message_public_id=dispatch.core_message_public_id,
+                event_type=event_type,
+                event_payload_json=payload,
+                created_at=utcnow(),
+            )
+        )
+    if event_type in {"delivered", "read", "failed"}:
+        emit_event(
+            account_id=dispatch.account_id,
+            student_id=dispatch.student_id,
+            event_type=f"message_{event_type}",
+            source="whatsapp_core",
+            title="Falha no envio pelo WhatsApp" if event_type == "failed" else f"WhatsApp {event_type}",
+            body=payload.get("providerErrorMessage") or dispatch.message_category,
+            severity="critical" if event_type == "failed" else "info",
+            event_key=f"whatsapp_delivery:{dispatch.id}:{event_type}:{provider_event_id or 'current'}",
+            payload=payload,
+        )
     db.session.commit()
     return dispatch
+
+
+def apply_core_delivery_status(payload: dict) -> tuple[OutboundMessageDispatch, bool]:
+    public_id = str(payload.get("coreMessagePublicId") or "").strip()
+    external_reference = str(payload.get("externalReference") or "").strip()
+    dispatch = None
+    if public_id:
+        dispatch = OutboundMessageDispatch.query.filter_by(core_message_public_id=public_id).first()
+    if dispatch is None and external_reference:
+        dispatch = OutboundMessageDispatch.query.filter_by(external_reference=external_reference).first()
+    if dispatch is None:
+        raise ApiError("Dispatch do Core ainda nao esta disponivel.", HTTPStatus.NOT_FOUND)
+    previous_status = dispatch.local_status
+    record_delivery_event(dispatch=dispatch, event_type=str(payload.get("status") or ""), payload=payload)
+    return dispatch, dispatch.local_status != previous_status
 
 
 def parse_inbound_intent(text: str | None) -> tuple[str, float]:
@@ -940,6 +1023,79 @@ def parse_inbound_intent(text: str | None) -> tuple[str, float]:
     if normalized:
         return ("generic_text", 0.4)
     return ("generic_text", 0.1)
+
+
+def observe_core_inbound_message(
+    *,
+    phone_number: str | None,
+    text: str | None,
+    message_type: str,
+    metadata: dict,
+) -> tuple[InboundMessageRecord | None, bool]:
+    provider_message_id = str(metadata.get("providerMessageId") or "").strip()
+    if provider_message_id:
+        existing = InboundMessageRecord.query.filter_by(provider_message_id=provider_message_id).first()
+        if existing is not None:
+            return existing, True
+
+    inbound_phone_variants = phone_variants(phone_number)
+    if not inbound_phone_variants:
+        return None, False
+    students = StudentProfile.query.filter(
+        StudentProfile.phone.isnot(None),
+        StudentProfile.archived_at.is_(None),
+    ).order_by(StudentProfile.created_at.desc()).all()
+    student = next(
+        (
+            item
+            for item in students
+            if any(variant in inbound_phone_variants for variant in phone_variants(item.phone))
+        ),
+        None,
+    )
+    if student is None:
+        return None, False
+
+    now = utcnow()
+    parsed_intent, confidence = parse_inbound_intent(text)
+    inbound = InboundMessageRecord(
+        account_id=student.account_id,
+        student_id=student.id,
+        provider_message_id=provider_message_id or None,
+        wa_from_phone=inbound_phone_variants[0],
+        message_type=message_type or "text",
+        text_body=text,
+        media_json=metadata.get("media") or {},
+        parsed_intent=parsed_intent,
+        confidence=confidence,
+        raw_payload_json=metadata.get("rawPayload") or {},
+        processed=True,
+        processing_status="completed",
+        received_at=now,
+    )
+    db.session.add(inbound)
+    student.last_contact_at = now
+    student.last_activity_at = now
+    student.last_signal_summary = "Resposta recebida pelo WhatsApp"
+    emit_event(
+        account_id=student.account_id,
+        student_id=student.id,
+        event_type="response_received",
+        source="whatsapp_core",
+        title="Mensagem recebida pelo WhatsApp",
+        body=text,
+        severity="info",
+        event_key=f"whatsapp_inbound:{provider_message_id or inbound.id}",
+        payload={
+            "provider_message_id": provider_message_id,
+            "core_message_public_id": metadata.get("coreMessagePublicId"),
+            "message_type": message_type,
+        },
+    )
+    recompute_and_persist_score(student)
+    evaluate_retention_automation(student)
+    db.session.commit()
+    return inbound, False
 
 
 def record_inbound_message(*, student: StudentProfile, phone: str | None, message_type: str, text_body: str | None, media_json: dict | None, raw_payload_json: dict | None, enqueue: bool = True) -> InboundMessageRecord:

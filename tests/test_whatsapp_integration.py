@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from app.extensions import db
 from app.jobs.tasks import process_inbound_whatsapp_message_job
 from app.students.models import StudentDailySignal
-from app.whatsapp.models import InboundMessageRecord, OutboundMessageDispatch
+from app.whatsapp.models import InboundMessageRecord, OutboundMessageDispatch, WhatsAppDeliveryStatusEvent
 from app.whatsapp.services import check_pending_workout_sessions, perform_dispatch
 from app.workouts.models import WorkoutSession
 
@@ -44,7 +44,7 @@ def test_whatsapp_onboarding_and_manual_dispatch(client, auth_headers, seeded_da
         perform_dispatch(dispatch_id)
         dispatch = db.session.get(OutboundMessageDispatch, dispatch_id)
         assert dispatch is not None
-        assert dispatch.local_status == "sent"
+        assert dispatch.local_status == "accepted"
         assert dispatch.core_message_public_id == "core-msg-1"
 
 
@@ -211,6 +211,119 @@ def test_whatsapp_status_and_history_endpoints(client, auth_headers, seeded_data
         assert "Olá, Joao! Seu personal deixou um recado:" in body
         assert "Mensagem de teste" in body
         assert "Se quiser alinhar algum detalhe" in body
+
+
+def test_core_delivery_status_updates_dispatch_idempotently(client, auth_headers, seeded_data, monkeypatch):
+    from app.jobs import tasks
+
+    monkeypatch.setattr(tasks.send_whatsapp_message_job, "delay", lambda *args, **kwargs: None)
+    student_id = str(seeded_data["student"].id)
+    queued = _ok(
+        client.post(
+            f"/api/v1/students/{student_id}/whatsapp/send-message",
+            headers=auth_headers,
+            json={"message_text": "Status pelo Core"},
+        ),
+        202,
+    )
+    dispatch_id = queued["dispatch"]["id"]
+    with client.application.app_context():
+        dispatch = db.session.get(OutboundMessageDispatch, dispatch_id)
+        dispatch.core_message_public_id = "core-public-status-1"
+        db.session.commit()
+
+    payload = {
+        "coreMessagePublicId": "core-public-status-1",
+        "externalReference": "ignored",
+        "status": "delivered",
+        "providerMessageId": "wamid.outbound-1",
+        "providerEventId": "wamid.outbound-1",
+    }
+    headers = {"X-Bot-Secret": client.application.config["BOT_INTERNAL_SECRET"]}
+    first = _ok(client.post("/api/v1/internal/bot/whatsapp/status", headers=headers, json=payload))
+    second = _ok(client.post("/api/v1/internal/bot/whatsapp/status", headers=headers, json=payload))
+    assert first["status"] == "delivered"
+    assert first["changed"] is True
+    assert second["changed"] is False
+    with client.application.app_context():
+        dispatch = db.session.get(OutboundMessageDispatch, dispatch_id)
+        assert dispatch.local_status == "delivered"
+        assert WhatsAppDeliveryStatusEvent.query.filter_by(outbound_dispatch_id=dispatch.id).count() == 1
+
+
+def test_core_inbound_is_persisted_once_and_refreshes_student(client, seeded_data):
+    student = seeded_data["student"]
+    headers = {"X-Bot-Secret": client.application.config["BOT_INTERNAL_SECRET"]}
+    payload = {
+        "phoneNumber": student.phone,
+        "text": "oi",
+        "messageType": "text",
+        "phase": "idle",
+        "metadata": {
+            "providerMessageId": "wamid.inbound-1",
+            "coreMessagePublicId": "core-inbound-1",
+            "rawPayload": {"id": "wamid.inbound-1", "type": "text"},
+        },
+    }
+    first = _ok(client.post("/api/v1/internal/bot/whatsapp/respond", headers=headers, json=payload))
+    second = _ok(client.post("/api/v1/internal/bot/whatsapp/respond", headers=headers, json=payload))
+    assert first["handled"] is True
+    assert second["duplicate"] is True
+    assert second["replyText"] == ""
+    with client.application.app_context():
+        assert InboundMessageRecord.query.filter_by(provider_message_id="wamid.inbound-1").count() == 1
+        refreshed_student = db.session.get(type(student), student.id)
+        assert refreshed_student.last_contact_at is not None
+        assert refreshed_student.last_activity_at is not None
+
+
+def test_core_inbound_matches_brazilian_phone_without_ninth_digit(client, seeded_data):
+    student = seeded_data["student"]
+    headers = {"X-Bot-Secret": client.application.config["BOT_INTERNAL_SECRET"]}
+    phone_digits = "".join(char for char in student.phone if char.isdigit())
+    if phone_digits.startswith("55") and len(phone_digits) == 13 and phone_digits[4] == "9":
+        phone_digits = f"{phone_digits[:4]}{phone_digits[5:]}"
+    payload = {
+        "phoneNumber": phone_digits,
+        "text": "oi pela variante",
+        "messageType": "text",
+        "phase": "idle",
+        "metadata": {"providerMessageId": "wamid.variant-1"},
+    }
+    response = _ok(client.post("/api/v1/internal/bot/whatsapp/respond", headers=headers, json=payload))
+    assert response["handled"] is True
+    with client.application.app_context():
+        inbound = InboundMessageRecord.query.filter_by(provider_message_id="wamid.variant-1").one()
+        assert inbound.student_id == student.id
+
+
+def test_core_inbound_blocked_media_is_recorded_without_running_bot(client, seeded_data, monkeypatch):
+    from app.ai import routes
+
+    monkeypatch.setattr(routes, "reply_for_whatsapp", lambda **kwargs: (_ for _ in ()).throw(AssertionError("bot must not run")))
+    student = seeded_data["student"]
+    headers = {"X-Bot-Secret": client.application.config["BOT_INTERNAL_SECRET"]}
+    payload = {
+        "phoneNumber": student.phone,
+        "text": "",
+        "messageType": "image",
+        "phase": "idle",
+        "metadata": {
+            "providerMessageId": "wamid.blocked-image-1",
+            "media": {"id": "media-1", "type": "image"},
+            "mediaSafety": {
+                "allowed": False,
+                "category": "adult_nudity",
+                "severity": "block",
+                "userMessage": "Não consigo analisar esse tipo de imagem por aqui.",
+            },
+        },
+    }
+    response = _ok(client.post("/api/v1/internal/bot/whatsapp/respond", headers=headers, json=payload))
+    assert response["mediaBlocked"] is True
+    assert "Não consigo analisar" in response["replyText"]
+    with client.application.app_context():
+        assert InboundMessageRecord.query.filter_by(provider_message_id="wamid.blocked-image-1").count() == 1
 
 
 def test_end_of_day_report_uses_daily_meals_and_is_idempotent(client, auth_headers, seeded_data, monkeypatch):
