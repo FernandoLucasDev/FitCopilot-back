@@ -103,7 +103,9 @@ class Settings:
 class TestSettings(Settings):
     SQLALCHEMY_DATABASE_URI: str = "sqlite+pysqlite:///:memory:"
     TESTING: bool = True
-    CORE_PROXY_MODE: str = "disabled"
+    CORE_API_URL: str | None = None
+    CORE_HOST_HEADER: str | None = None
+    CORE_PROXY_MODE: str = "local"
     STORAGE_PROVIDER: str = "local"
     AI_PROVIDER: str = "fake"
     OTP_DEBUG_CODES_ENABLED: bool = True

@@ -91,3 +91,11 @@ def check_rate_limit(*, key: str, limit: int, window_seconds: int) -> None:
 
 def reset_rate_limits() -> None:
     _BUCKETS.clear()
+    try:
+        r = _get_redis()
+        if not r:
+            return
+        for key in r.scan_iter("rl:*"):
+            r.delete(key)
+    except Exception:
+        logger.warning("Redis rate-limit cleanup failed", exc_info=True)

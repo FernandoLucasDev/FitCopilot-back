@@ -10,7 +10,7 @@ from app.integrations.core_client import core_client
 
 class CoreAuthService:
     def is_enabled(self) -> bool:
-        return bool(current_app.config.get("CORE_API_URL"))
+        return bool(current_app.config.get("CORE_API_URL")) and current_app.config.get("CORE_PROXY_MODE") != "disabled"
 
     def register(self, *, full_name: str, email: str, password: str, phone: str | None = None) -> dict[str, Any]:
         # Core signup creates the app membership; login is what returns session tokens.

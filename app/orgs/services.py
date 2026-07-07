@@ -44,7 +44,7 @@ def utcnow() -> datetime:
 
 
 def core_orgs_enabled() -> bool:
-    return bool(current_app.config.get("CORE_API_URL"))
+    return bool(current_app.config.get("CORE_API_URL")) and current_app.config.get("CORE_PROXY_MODE") != "disabled"
 
 
 def normalize_org_membership(row: dict[str, Any]) -> dict[str, Any]:

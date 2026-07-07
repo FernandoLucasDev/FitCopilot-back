@@ -82,7 +82,7 @@ class BillingGateway:
     ]
 
     def _enabled(self) -> bool:
-        return bool(current_app.config.get("CORE_API_URL"))
+        return bool(current_app.config.get("CORE_API_URL")) and current_app.config.get("CORE_PROXY_MODE") != "disabled"
 
     def _plan_by_code(self, code: str | None) -> dict[str, Any]:
         normalized = str(code or "FREE").upper()
