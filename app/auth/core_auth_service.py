@@ -25,7 +25,7 @@ class CoreAuthService:
         return core_client.request(method="GET", path="/auth/me/", token=token)
 
     def refresh(self, *, refresh_token: str) -> dict[str, Any]:
-        payload = {"refresh_token": refresh_token}
+        payload = {"refresh": refresh_token}
         return core_client.request(method="POST", path="/auth/refresh/", json=payload)
 
 
