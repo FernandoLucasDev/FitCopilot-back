@@ -58,7 +58,18 @@ def phone_variants(phone: str | None) -> list[str]:
 
 
 def _owner_context(student: StudentProfile) -> tuple[str, str | None]:
-    owner = student.account.users[0] if student.account and student.account.users else None
+    account_users = list(student.account.users) if student.account and student.account.users else []
+    role_priority = {"owner": 0, "admin": 1, "professional": 2}
+    eligible_users = [user for user in account_users if user.core_access_token]
+    owner = next(
+        iter(
+            sorted(
+                eligible_users,
+                key=lambda user: role_priority.get(str(user.role or "").lower(), 99),
+            )
+        ),
+        None,
+    )
     token = owner.core_access_token if owner else None
     org_id = student.account.external_org_id if student.account else None
     if not token:
