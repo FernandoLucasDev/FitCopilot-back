@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20260712_0011"
@@ -17,13 +18,16 @@ branch_labels = None
 depends_on = None
 
 
+GUID = postgresql.UUID(as_uuid=True).with_variant(sa.String(length=36), "sqlite")
+
+
 def upgrade() -> None:
     op.create_table(
         "operational_incidents",
-        sa.Column("id", sa.String(length=36), nullable=False),
+        sa.Column("id", GUID, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("account_id", sa.String(length=36), nullable=True),
+        sa.Column("account_id", GUID, nullable=True),
         sa.Column("title", sa.String(length=200), nullable=False),
         sa.Column("severity", sa.String(length=20), nullable=False, server_default="minor"),
         sa.Column("status", sa.String(length=20), nullable=False, server_default="open"),

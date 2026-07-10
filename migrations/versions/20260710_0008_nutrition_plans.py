@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20260710_0008"
@@ -17,21 +18,24 @@ branch_labels = None
 depends_on = None
 
 
+GUID = postgresql.UUID(as_uuid=True).with_variant(sa.String(length=36), "sqlite")
+
+
 def upgrade() -> None:
     op.create_table(
         "nutrition_plans",
-        sa.Column("id", sa.String(length=36), nullable=False),
+        sa.Column("id", GUID, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("account_id", sa.String(length=36), nullable=False),
-        sa.Column("student_id", sa.String(length=36), nullable=False),
-        sa.Column("created_by_user_id", sa.String(length=36), nullable=False),
+        sa.Column("account_id", GUID, nullable=False),
+        sa.Column("student_id", GUID, nullable=False),
+        sa.Column("created_by_user_id", GUID, nullable=False),
         sa.Column("title", sa.String(length=120), nullable=False),
         sa.Column("objective", sa.String(length=120), nullable=True),
         sa.Column("notes", sa.Text(), nullable=True),
         sa.Column("status", sa.String(length=20), nullable=False, server_default="draft"),
         sa.Column("version_number", sa.Integer(), nullable=False, server_default="1"),
-        sa.Column("previous_version_id", sa.String(length=36), nullable=True),
+        sa.Column("previous_version_id", GUID, nullable=True),
         sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], name=op.f("fk_nutrition_plans_account_id_accounts")),
         sa.ForeignKeyConstraint(["created_by_user_id"], ["users.id"], name=op.f("fk_nutrition_plans_created_by_user_id_users")),
@@ -44,10 +48,10 @@ def upgrade() -> None:
 
     op.create_table(
         "nutrition_plan_meals",
-        sa.Column("id", sa.String(length=36), nullable=False),
+        sa.Column("id", GUID, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("nutrition_plan_id", sa.String(length=36), nullable=False),
+        sa.Column("nutrition_plan_id", GUID, nullable=False),
         sa.Column("label", sa.String(length=80), nullable=False),
         sa.Column("order_index", sa.Integer(), nullable=False),
         sa.Column("notes", sa.Text(), nullable=True),
@@ -60,10 +64,10 @@ def upgrade() -> None:
 
     op.create_table(
         "nutrition_plan_food_items",
-        sa.Column("id", sa.String(length=36), nullable=False),
+        sa.Column("id", GUID, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("nutrition_plan_meal_id", sa.String(length=36), nullable=False),
+        sa.Column("nutrition_plan_meal_id", GUID, nullable=False),
         sa.Column("order_index", sa.Integer(), nullable=False),
         sa.Column("food_name", sa.String(length=160), nullable=False),
         sa.Column("quantity_text", sa.String(length=80), nullable=True),
@@ -88,12 +92,12 @@ def upgrade() -> None:
 
     op.create_table(
         "student_nutrition_plans",
-        sa.Column("id", sa.String(length=36), nullable=False),
+        sa.Column("id", GUID, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("student_id", sa.String(length=36), nullable=False),
-        sa.Column("plan_id", sa.String(length=36), nullable=False),
-        sa.Column("assigned_by_user_id", sa.String(length=36), nullable=True),
+        sa.Column("student_id", GUID, nullable=False),
+        sa.Column("plan_id", GUID, nullable=False),
+        sa.Column("assigned_by_user_id", GUID, nullable=True),
         sa.Column("assigned_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.ForeignKeyConstraint(["assigned_by_user_id"], ["users.id"], name=op.f("fk_student_nutrition_plans_assigned_by_user_id_users")),

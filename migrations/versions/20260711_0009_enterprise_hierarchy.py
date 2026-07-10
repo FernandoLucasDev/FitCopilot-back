@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20260711_0009"
@@ -17,8 +18,11 @@ branch_labels = None
 depends_on = None
 
 
+GUID = postgresql.UUID(as_uuid=True).with_variant(sa.String(length=36), "sqlite")
+
+
 def upgrade() -> None:
-    op.add_column("accounts", sa.Column("parent_account_id", sa.String(length=36), nullable=True))
+    op.add_column("accounts", sa.Column("parent_account_id", GUID, nullable=True))
     op.add_column("accounts", sa.Column("account_type", sa.String(length=20), nullable=False, server_default="studio"))
     op.add_column("accounts", sa.Column("brand_config", sa.JSON(), nullable=False, server_default="{}"))
     op.add_column("accounts", sa.Column("enterprise_contract_json", sa.JSON(), nullable=False, server_default="{}"))

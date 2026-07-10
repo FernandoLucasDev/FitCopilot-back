@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20260713_0012"
@@ -17,14 +18,17 @@ branch_labels = None
 depends_on = None
 
 
+GUID = postgresql.UUID(as_uuid=True).with_variant(sa.String(length=36), "sqlite")
+
+
 def upgrade() -> None:
     op.create_table(
         "wearable_connections",
-        sa.Column("id", sa.String(length=36), nullable=False),
+        sa.Column("id", GUID, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("student_id", sa.String(length=36), nullable=False),
-        sa.Column("account_id", sa.String(length=36), nullable=False),
+        sa.Column("student_id", GUID, nullable=False),
+        sa.Column("account_id", GUID, nullable=False),
         sa.Column("source", sa.String(length=20), nullable=False),
         sa.Column("external_athlete_id", sa.String(length=80), nullable=True),
         sa.Column("access_token_encrypted", sa.Text(), nullable=False),
@@ -48,11 +52,11 @@ def upgrade() -> None:
 
     op.create_table(
         "wearable_data_points",
-        sa.Column("id", sa.String(length=36), nullable=False),
+        sa.Column("id", GUID, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("student_id", sa.String(length=36), nullable=False),
-        sa.Column("account_id", sa.String(length=36), nullable=False),
+        sa.Column("student_id", GUID, nullable=False),
+        sa.Column("account_id", GUID, nullable=False),
         sa.Column("source", sa.String(length=20), nullable=False),
         sa.Column("metric_type", sa.String(length=30), nullable=False),
         sa.Column("value", sa.Float(), nullable=False),
@@ -76,10 +80,10 @@ def upgrade() -> None:
 
     op.create_table(
         "wearable_connect_challenges",
-        sa.Column("id", sa.String(length=36), nullable=False),
+        sa.Column("id", GUID, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("student_id", sa.String(length=36), nullable=False),
+        sa.Column("student_id", GUID, nullable=False),
         sa.Column("provider", sa.String(length=20), nullable=False),
         sa.Column("state_token", sa.String(length=64), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
