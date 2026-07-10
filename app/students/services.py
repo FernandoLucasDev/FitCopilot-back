@@ -180,6 +180,12 @@ def delete_student(*, student: StudentProfile, actor_user_id) -> None:
     from app.jobs.models import BackgroundJob
     from app.messaging.models import SuggestedMessage
     from app.operations.models import AutomationDecision
+    from app.physical.models import (
+        PhysicalAssessment,
+        PhysicalAssessmentAIRun,
+        PhysicalAssessmentComparison,
+        PhysicalAssessmentPhoto,
+    )
     from app.reports.models import GeneratedReport
     from app.students.portal_models import StudentLoginChallenge
     from app.whatsapp.models import (
@@ -218,6 +224,21 @@ def delete_student(*, student: StudentProfile, actor_user_id) -> None:
         )
         WorkoutPlanDay.query.filter(WorkoutPlanDay.workout_plan_id.in_(plan_ids)).delete(synchronize_session=False)
 
+    assessment_ids = [row.id for row in PhysicalAssessment.query.filter_by(student_id=student_id).all()]
+    if assessment_ids:
+        PhysicalAssessmentComparison.query.filter(
+            (PhysicalAssessmentComparison.from_assessment_id.in_(assessment_ids))
+            | (PhysicalAssessmentComparison.to_assessment_id.in_(assessment_ids))
+        ).delete(synchronize_session=False)
+        PhysicalAssessmentPhoto.query.filter(PhysicalAssessmentPhoto.assessment_id.in_(assessment_ids)).delete(
+            synchronize_session=False
+        )
+        PhysicalAssessmentAIRun.query.filter(PhysicalAssessmentAIRun.assessment_id.in_(assessment_ids)).delete(
+            synchronize_session=False
+        )
+
+    AIInsight.query.filter_by(student_id=student_id).delete(synchronize_session=False)
+
     for model in (
         SuggestedMessage,
         AutomationDecision,
@@ -229,6 +250,7 @@ def delete_student(*, student: StudentProfile, actor_user_id) -> None:
         InboundMessageRecord,
         GeneratedReport,
         StudentFile,
+        PhysicalAssessment,
         WorkoutSession,
         StudentWorkout,
         WorkoutPlan,
@@ -239,7 +261,6 @@ def delete_student(*, student: StudentProfile, actor_user_id) -> None:
     ):
         model.query.filter_by(student_id=student_id).delete(synchronize_session=False)
 
-    AIInsight.query.filter_by(student_id=student_id).delete(synchronize_session=False)
     BackgroundJob.query.filter_by(student_id=student_id).update({"student_id": None}, synchronize_session=False)
 
     if user_id:
@@ -327,8 +348,12 @@ def recompute_student_score(student: StudentProfile) -> StudentProfile:
     return student
 
 
-def list_students_for_workspace(*, account_id, search: str | None = None, status: str | None = None) -> list[dict]:
+def list_students_for_workspace(
+    *, account_id, search: str | None = None, status: str | None = None, primary_professional_id=None
+) -> list[dict]:
     query = StudentProfile.query.filter_by(account_id=account_id)
+    if primary_professional_id is not None:
+        query = query.filter(StudentProfile.primary_professional_id == primary_professional_id)
     if status == "archived":
         query = query.filter(StudentProfile.archived_at.is_not(None))
     else:

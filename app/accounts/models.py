@@ -21,15 +21,22 @@ class Account(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, db.Model):
     timezone: Mapped[str] = mapped_column(String(60), nullable=False, default="America/Sao_Paulo")
     locale: Mapped[str] = mapped_column(String(10), nullable=False, default="pt-BR")
     current_plan_code: Mapped[str | None] = mapped_column(String(40))
+    professional_vertical: Mapped[str] = mapped_column(String(30), nullable=False, default="personal_trainer")
     max_students: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     monthly_ai_credits: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
     ai_credits_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     settings_json: Mapped[dict] = mapped_column(JSONB().with_variant(db.JSON(), "sqlite"), nullable=False, default=dict)
     external_org_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    parent_account_id: Mapped[str | None] = mapped_column(db.ForeignKey("accounts.id"), index=True)
+    account_type: Mapped[str] = mapped_column(String(20), nullable=False, default="studio", index=True)
+    brand_config: Mapped[dict] = mapped_column(JSONB().with_variant(db.JSON(), "sqlite"), nullable=False, default=dict)
+    enterprise_contract_json: Mapped[dict] = mapped_column(JSONB().with_variant(db.JSON(), "sqlite"), nullable=False, default=dict)
 
     users = relationship("User", back_populates="account")
     professionals = relationship("ProfessionalProfile", back_populates="account")
     students = relationship("StudentProfile", back_populates="account")
+    parent_account = relationship("Account", remote_side="Account.id", back_populates="child_accounts")
+    child_accounts = relationship("Account", back_populates="parent_account")
 
 
 class ProfessionalProfile(UUIDPrimaryKeyMixin, TimestampMixin, db.Model):

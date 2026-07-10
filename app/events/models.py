@@ -40,6 +40,16 @@ class EventType:
     STUDENT_CREATED = "student_created"
     WORKOUT_ASSIGNED = "workout_assigned"
 
+    # Academia (conectores externos)
+    ACADEMY_CHECKIN_DETECTED = "academy_checkin_detected"
+    ACADEMY_ABSENCE_DETECTED = "academy_absence_detected"
+
+    # Wearables
+    WEARABLE_CONNECTED = "wearable_connected"
+    WEARABLE_DISCONNECTED = "wearable_disconnected"
+    WEARABLE_SYNC_COMPLETED = "wearable_sync_completed"
+    WEARABLE_ALERT_TRIGGERED = "wearable_alert_triggered"
+
 
 class EventSource:
     WHATSAPP = "whatsapp"
@@ -47,6 +57,8 @@ class EventSource:
     PROFESSIONAL = "professional"
     PORTAL = "portal"
     CELERY = "celery"
+    ACADEMY = "academy"
+    WEARABLE = "wearable"
 
 
 class StudentEvent(UUIDPrimaryKeyMixin, db.Model):
@@ -101,13 +113,14 @@ class StudentHealthScore(UUIDPrimaryKeyMixin, db.Model):
 
     __tablename__ = "student_health_scores"
     __table_args__ = (
-        UniqueConstraint("student_id", "score_date", name="uq_student_health_score_student_date"),
+        UniqueConstraint("student_id", "score_date", "score_type", name="uq_student_health_score_student_date_type"),
     )
 
     student_id: Mapped[str] = mapped_column(db.ForeignKey("student_profiles.id"), nullable=False, index=True)
     account_id: Mapped[str] = mapped_column(db.ForeignKey("accounts.id"), nullable=False, index=True)
 
     score_date: Mapped[datetime] = mapped_column(db.Date(), nullable=False, index=True)
+    score_type: Mapped[str] = mapped_column(String(20), nullable=False, default="operational", index=True)
 
     raw_score: Mapped[int] = mapped_column(db.Integer, nullable=False, default=70)
     level: Mapped[str] = mapped_column(String(20), nullable=False, default="ok", index=True)

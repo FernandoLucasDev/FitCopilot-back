@@ -5,6 +5,8 @@ from app.insights.models import AIInsight
 from app.jobs.models import AuditLog, BackgroundJob
 from app.messaging.models import SuggestedMessage
 from app.events.models import StudentEvent, StudentHealthScore
+from app.integrations.academy.models import AcademyWebhookLog, ExternalSystemMapping
+from app.nutrition.models import NutritionPlan, NutritionPlanFoodItem, NutritionPlanMeal, StudentNutritionPlan
 from app.operations.models import AutomationDecision
 from app.physical.models import (
     PhysicalAssessment,
@@ -13,6 +15,8 @@ from app.physical.models import (
     PhysicalAssessmentPhoto,
 )
 from app.reports.models import GeneratedReport
+from app.system.incident_models import OperationalIncident
+from app.wearables.models import WearableConnectChallenge, WearableConnection, WearableDataPoint
 from app.students.models import (
     StudentDailySignal,
     StudentDailySummary,
@@ -66,4 +70,14 @@ __all__ = [
     "GeneratedReport",
     "BackgroundJob",
     "AuditLog",
+    "NutritionPlan",
+    "NutritionPlanMeal",
+    "NutritionPlanFoodItem",
+    "StudentNutritionPlan",
+    "ExternalSystemMapping",
+    "AcademyWebhookLog",
+    "OperationalIncident",
+    "WearableConnection",
+    "WearableDataPoint",
+    "WearableConnectChallenge",
 ]

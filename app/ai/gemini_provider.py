@@ -162,12 +162,16 @@ Contexto JSON:
     def analyze_meal(self, *, context: dict) -> MealAnalysisResult:
         payload = self._generate_json(
             prompt=f"""
-Voce e o FitCopilot. Analise uma refeicao descrita no WhatsApp e devolva JSON com:
-estimated_calories, protein_grams, carbs_grams, fats_grams, summary_text, guidance_text.
+Voce e o FitCopilot. Analise uma refeicao descrita em texto no WhatsApp (sem imagem) e devolva JSON com:
+estimated_calories, protein_grams, carbs_grams, fats_grams, summary_text, guidance_text, confidence, items.
+
+- items: lista de objetos {{"name": string, "quantity_estimate": string, "calories": number}} com o breakdown
+  aproximado de cada alimento citado (ex.: "Arroz", "180g", 234). Se nao conseguir separar por item, devolva lista vazia.
+- confidence: numero entre 0 e 1 representando o quanto voce confia na estimativa dada a descricao recebida.
 
 Se faltar contexto ou a porcao for incerta, estime de forma prudente e evite subestimar pratos densos.
 Arroz + feijao + carne/bife + batata frita normalmente fica mais perto de 700-950 kcal do que de 450 kcal.
-Seja curto e util.
+Deixe claro que e uma estimativa aproximada, nunca um valor exato. Seja curto e util.
 
 Contexto JSON:
 {json.dumps(context, ensure_ascii=False, default=str)}
@@ -177,6 +181,7 @@ Contexto JSON:
         if not payload:
             return self._fallback.analyze_meal(context=context)
         fallback = self._fallback.analyze_meal(context=context)
+        items = payload.get("items")
         return MealAnalysisResult(
             estimated_calories=payload.get("estimated_calories") if payload.get("estimated_calories") is not None else fallback.estimated_calories,
             protein_grams=payload.get("protein_grams") if payload.get("protein_grams") is not None else fallback.protein_grams,
@@ -184,6 +189,8 @@ Contexto JSON:
             fats_grams=payload.get("fats_grams") if payload.get("fats_grams") is not None else fallback.fats_grams,
             summary_text=payload.get("summary_text") or fallback.summary_text,
             guidance_text=payload.get("guidance_text") or fallback.guidance_text,
+            items=items if isinstance(items, list) and items else fallback.items,
+            confidence=payload.get("confidence") if isinstance(payload.get("confidence"), (int, float)) else fallback.confidence,
         )
 
     def moderate_media(self, *, content: bytes, mime_type: str, context: dict) -> MediaSafetyResult:

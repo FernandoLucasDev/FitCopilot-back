@@ -8,6 +8,7 @@ from app.files.models import StudentFile
 from app.jobs.models import BackgroundJob
 from app.jobs.services import finish_background_job
 from app.messaging.models import SuggestedMessage
+from app.nutrition.services import evaluate_nutrition_automation
 from app.reports.models import GeneratedReport
 from app.students.models import StudentDailySummary, StudentInteraction, StudentProfile
 from app.students.services import compute_student_score
@@ -229,6 +230,10 @@ def generate_student_report_job(report_id: str):
     report.status = "processing"
     student = report.student
     ai_provider = current_app.extensions["ai_provider"]
+
+    if report.report_type == "nutrition_summary":
+        return _generate_nutrition_report(report=report, student=student, ai_provider=ai_provider)
+
     recent_files = [
         {
             "title": item.title,
@@ -284,6 +289,62 @@ def generate_student_report_job(report_id: str):
     report.completed_at = utcnow()
     db.session.commit()
     return {"status": "completed", "report_id": report_id}
+
+
+def _generate_nutrition_report(*, report: GeneratedReport, student, ai_provider) -> dict:
+    from flask import current_app
+
+    from app.nutrition.services import latest_food_score, weekly_food_summary
+
+    summary = weekly_food_summary(student)
+    food_score = latest_food_score(student)
+    report.summary_text = ai_provider.summarize_student_progress(
+        context={
+            "student_name": student.full_name,
+            "goal": student.main_objective_text,
+            "weekly_food_summary": summary,
+            "food_score": food_score,
+            "period_start": report.period_start.isoformat() if report.period_start else None,
+            "period_end": report.period_end.isoformat() if report.period_end else None,
+        }
+    )
+    storage = current_app.extensions["storage_provider"]
+    pdf_content = _build_student_report_pdf(
+        title=f"Relatorio Nutricional FitCopilot - {student.full_name}",
+        subtitle=f"nutrition_summary | {report.period_start.isoformat() if report.period_start else 'inicio'} a {report.period_end.isoformat() if report.period_end else 'hoje'}",
+        sections=[
+            ("Resumo inteligente", report.summary_text or "Relatorio gerado sem resumo disponivel."),
+            ("Resumo alimentar do periodo", _format_weekly_food_summary_for_report(summary)),
+            ("Score alimentar", f"{food_score['score']} ({food_score['level']}) — {food_score['reason']}"),
+        ],
+    )
+    stored = storage.save(f"accounts/{report.account_id}/reports", f"{report.report_type}.pdf", pdf_content, "application/pdf")
+    report.storage_key = stored.storage_key
+    report.file_url = stored.file_url
+    report.status = "completed"
+    report.completed_at = utcnow()
+    db.session.commit()
+    return {"status": "completed", "report_id": str(report.id)}
+
+
+def _format_weekly_food_summary_for_report(summary: dict) -> str:
+    if not summary.get("daysWithLog"):
+        return f"Nenhuma refeição registrada entre {summary.get('periodStart')} e {summary.get('periodEnd')}."
+    lines = [
+        f"Dias com registro: {summary['daysWithLog']}/{summary['daysInPeriod']}",
+        f"Média de calorias por dia: {summary.get('avgCaloriesKcal') or '—'} kcal",
+    ]
+    macros = [
+        f"proteína {summary['avgProteinGrams']}g" if summary.get("avgProteinGrams") else None,
+        f"carboidratos {summary['avgCarbsGrams']}g" if summary.get("avgCarbsGrams") else None,
+        f"gordura {summary['avgFatsGrams']}g" if summary.get("avgFatsGrams") else None,
+    ]
+    macros = [item for item in macros if item]
+    if macros:
+        lines.append("Macros médios: " + ", ".join(macros))
+    if summary.get("targetAdherencePct") is not None:
+        lines.append(f"Aderência à meta calórica: {summary['targetAdherencePct']}%")
+    return "\n".join(lines)
 
 
 def _format_workout_sessions_for_report(workout_sessions: list[dict]) -> str:
@@ -395,6 +456,44 @@ def _build_student_report_pdf(*, title: str, subtitle: str, sections: list[tuple
     return bytes(pdf)
 
 
+def generate_network_monthly_report(network_account_id: str) -> bytes:
+    from app.accounts.enterprise_services import get_network_dashboard
+    from app.accounts.models import Account
+
+    network = Account.query.filter_by(id=network_account_id, deleted_at=None).first()
+    dashboard = get_network_dashboard(network_account_id)
+
+    overview_body = (
+        f"Unidades: {dashboard['unitsCount']}\n"
+        f"Alunos na rede: {dashboard['studentsTotal']}\n"
+        f"Retencao media: {dashboard['averageRetentionRate']}%"
+    )
+    sections = [("Visao geral da rede", overview_body)]
+
+    if not dashboard["units"]:
+        sections.append(("Unidades", "Nenhuma unidade cadastrada nesta rede no periodo."))
+    else:
+        for unit in dashboard["units"]:
+            unit_body = (
+                f"Alunos: {unit['studentsCount']}\n"
+                f"Em atencao: {unit['attentionCount']}\n"
+                f"Retencao: {unit['retentionRate']}%"
+                + ("\nChurn acima da media da rede." if unit["churnAlert"] else "")
+            )
+            sections.append((unit["unitName"], unit_body))
+
+    contract = (network.enterprise_contract_json or {}) if network else {}
+    if contract:
+        contract_body = "\n".join(f"{key}: {value}" for key, value in contract.items())
+        sections.append(("Contrato", contract_body))
+
+    return _build_student_report_pdf(
+        title=f"Relatorio mensal — {dashboard['networkName'] or 'Rede'}",
+        subtitle=utcnow().strftime("%d/%m/%Y"),
+        sections=sections,
+    )
+
+
 @celery_app.task(name="recompute_student_score_job")
 def recompute_student_score_job(student_id: str):
     student = StudentProfile.query.filter_by(id=student_id).first()
@@ -499,6 +598,49 @@ def send_end_of_day_reports_job(summary_date: str | None = None):
         )
         sent.append({"student_id": str(student.id), "dispatch_id": str(dispatch.id)})
     return {"status": "completed", "summary_date": target_date.isoformat(), "sent": sent, "skipped": skipped}
+
+
+@celery_app.task(name="evaluate_nutrition_automations_job")
+def evaluate_nutrition_automations_job():
+    from app.accounts.models import Account
+
+    nutri_account_ids = [row.id for row in Account.query.filter_by(professional_vertical="nutricionista").all()]
+    if not nutri_account_ids:
+        return {"status": "completed", "evaluated": 0, "triggered": 0}
+
+    students = StudentProfile.query.filter(
+        StudentProfile.account_id.in_(nutri_account_ids), StudentProfile.archived_at.is_(None)
+    ).all()
+    triggered = 0
+    for student in students:
+        decision = evaluate_nutrition_automation(student)
+        if decision is not None:
+            triggered += 1
+    db.session.commit()
+    return {"status": "completed", "evaluated": len(students), "triggered": triggered}
+
+
+@celery_app.task(name="sync_wearable_data_job")
+def sync_wearable_data_job():
+    from app.operations.services import recompute_and_persist_score
+    from app.wearables.alerts import evaluate_wearable_alerts
+    from app.wearables.models import WearableConnection
+    from app.wearables.services import sync_student_wearable_data
+
+    connections = WearableConnection.query.filter_by(revoked_at=None).all()
+    synced = 0
+    alerts_triggered = 0
+    for connection in connections:
+        result = sync_student_wearable_data(connection)
+        if result["status"] == "ok":
+            synced += 1
+        student = StudentProfile.query.filter_by(id=connection.student_id).first()
+        if student is not None:
+            recompute_and_persist_score(student)
+            db.session.commit()
+            if evaluate_wearable_alerts(student) is not None:
+                alerts_triggered += 1
+    return {"status": "completed", "connections": len(connections), "synced": synced, "alertsTriggered": alerts_triggered}
 
 
 @celery_app.task(name="send_reengagement_message_job")

@@ -8,13 +8,14 @@ from uuid import UUID
 
 from flask import Blueprint, current_app, request
 
-from app.ai.bot_orchestrator import reply_for_whatsapp
+from app.ai.bot_orchestrator import reply_for_whatsapp, resolve_student_by_phone
 from app.ai.local_agent import fitcopilot_agent
 from app.common.api import ApiError, success_response
 from app.common.security.auth import require_auth
 from app.common.security.rate_limit import check_rate_limit, client_ip
 from app.extensions import db
 from app.auth.core_auth_service import core_auth_service
+from app.files.services import save_meal_photo
 from app.integrations.core_email import core_email_gateway
 from app.jobs.models import AuditLog
 from app.auth.models import User
@@ -222,6 +223,20 @@ def bot_whatsapp_media_safety():
             category=result.category,
             severity=result.severity,
         )
+    elif result.category == "safe_food":
+        try:
+            student = resolve_student_by_phone(payload.get("phoneNumber"))
+            if student is not None:
+                save_meal_photo(student=student, content=content, mime_type=mime_type)
+                db.session.commit()
+        except Exception as exc:  # pragma: no cover - backup do anexo nunca deve bloquear a resposta de moderacao
+            db.session.rollback()
+            current_app.logger.warning(
+                "whatsapp_meal_photo_backup_failed phone=%s message_id=%s error=%s",
+                payload.get("phoneNumber"),
+                payload.get("messageId"),
+                exc,
+            )
 
     return success_response(
         {

@@ -80,12 +80,17 @@ class Settings:
     WHATSAPP_QUIET_HOURS_START: int = int(_env_or_file("WHATSAPP_QUIET_HOURS_START", "21") or "21")
     WHATSAPP_QUIET_HOURS_END: int = int(_env_or_file("WHATSAPP_QUIET_HOURS_END", "7") or "7")
     BOT_INTERNAL_SECRET: str = _env_or_file("BOT_INTERNAL_SECRET", "fitcopilot-bot-dev-secret") or "fitcopilot-bot-dev-secret"
+    ACADEMY_WEBHOOK_SECRET: str = _env_or_file("ACADEMY_WEBHOOK_SECRET", "fitcopilot-academy-dev-secret") or "fitcopilot-academy-dev-secret"
     OTP_RATE_LIMIT_PER_HOUR: int = int(_env_or_file("OTP_RATE_LIMIT_PER_HOUR", "5") or "5")
     OTP_DEBUG_CODES_ENABLED: bool = (_env_or_file("OTP_DEBUG_CODES_ENABLED", "false") or "false").lower() in {"1", "true", "yes", "on"}
     PASSWORD_RESET_RATE_LIMIT_PER_HOUR: int = int(_env_or_file("PASSWORD_RESET_RATE_LIMIT_PER_HOUR", "5") or "5")
     BOT_RATE_LIMIT_PER_MINUTE: int = int(_env_or_file("BOT_RATE_LIMIT_PER_MINUTE", "60") or "60")
     API_HOST: str = _env_or_file("API_HOST", "127.0.0.1") or "127.0.0.1"
     API_PORT: int = int(_env_or_file("API_PORT", "5050") or "5050")
+    WEARABLE_PROVIDER: str = _env_or_file("WEARABLE_PROVIDER", "fake") or "fake"
+    STRAVA_CLIENT_ID: str | None = _env_or_file("STRAVA_CLIENT_ID")
+    STRAVA_CLIENT_SECRET: str | None = _env_or_file("STRAVA_CLIENT_SECRET")
+    STRAVA_REDIRECT_URI: str | None = _env_or_file("STRAVA_REDIRECT_URI")
     SENTRY_DSN: str | None = _env_or_file("SENTRY_DSN")
     SENTRY_ENVIRONMENT: str = _env_or_file("SENTRY_ENVIRONMENT", "development") or "development"
     SENTRY_TRACES_SAMPLE_RATE: float = float(_env_or_file("SENTRY_TRACES_SAMPLE_RATE", "0.1") or "0.1")
@@ -97,6 +102,8 @@ class Settings:
             "http://localhost:3000,http://127.0.0.1:3000,http://localhost:4173,http://127.0.0.1:4173",
         )
         self.CORS_ORIGINS = [item.strip() for item in origins.split(",") if item.strip()]
+        if not self.STRAVA_REDIRECT_URI:
+            self.STRAVA_REDIRECT_URI = f"http://{self.API_HOST}:{self.API_PORT}/api/v1/wearable/strava/callback"
 
 
 @dataclass
@@ -108,6 +115,7 @@ class TestSettings(Settings):
     CORE_PROXY_MODE: str = "local"
     STORAGE_PROVIDER: str = "local"
     AI_PROVIDER: str = "fake"
+    WEARABLE_PROVIDER: str = "fake"
     OTP_DEBUG_CODES_ENABLED: bool = True
     SECRET_KEY: str = "test-secret-fitcopilot-32-bytes-minimum"
     JWT_SECRET_KEY: str = "test-jwt-secret-fitcopilot-32-bytes-minimum"

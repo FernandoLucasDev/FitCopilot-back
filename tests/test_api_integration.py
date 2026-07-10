@@ -7,6 +7,7 @@ import requests
 from app.extensions import db
 from app.auth.models import User
 from app.insights.models import AIInsight
+from app.physical.models import PhysicalAssessment
 from app.reports.models import GeneratedReport
 from app.students.models import StudentProfile
 from app.workouts.models import WorkoutPlan
@@ -135,8 +136,10 @@ def test_core_referral_stats_are_normalized_for_frontend(flask_app, monkeypatch)
 
 def test_students_list_panel_create_and_archive(client, auth_headers, monkeypatch):
     from app.jobs import tasks
+    from app.reports import routes as report_routes
 
     monkeypatch.setattr(tasks.send_whatsapp_message_job, "delay", lambda *args, **kwargs: None)
+    monkeypatch.setattr(report_routes.generate_student_report_job, "delay", lambda *args, **kwargs: None)
 
     listing = _ok(client.get("/api/v1/students", headers=auth_headers))
     assert len(listing["items"]) >= 1
@@ -202,12 +205,76 @@ def test_students_list_panel_create_and_archive(client, auth_headers, monkeypatc
         201,
     )
     removable_id = removable["student"]["id"]
+
+    workout = _ok(
+        client.post(
+            "/api/v1/workouts",
+            headers=auth_headers,
+            json={
+                "student_id": removable_id,
+                "title": "Ficha removivel",
+                "objective": "QA",
+                "days": [
+                    {
+                        "label": "Treino A",
+                        "order_index": 1,
+                        "exercises": [
+                            {
+                                "exercise_name": "Puxada QA",
+                                "order_index": 1,
+                                "sets_count": 4,
+                                "reps_text": "S1 12-15 | S2 10-12 | S3 8-10",
+                                "rest_seconds": 90,
+                            }
+                        ],
+                    }
+                ],
+            },
+        ),
+        201,
+    )
+    _ok(
+        client.post(
+            f"/api/v1/students/{removable_id}/assign-workout",
+            headers=auth_headers,
+            json={"plan_id": workout["workoutPlan"]["id"]},
+        ),
+        201,
+    )
+    _ok(
+        client.post(
+            f"/api/v1/students/{removable_id}/physical-assessments",
+            headers=auth_headers,
+            json={
+                "title": "Avaliação removivel",
+                "assessment_date": "2026-07-07",
+                "weight_kg": 82.5,
+                "height_cm": 178,
+                "body_fat_percentage": 18,
+                "waist_cm": 84,
+                "hip_cm": 98,
+            },
+        ),
+        201,
+    )
+    _ok(
+        client.post(
+            f"/api/v1/students/{removable_id}/reports",
+            headers=auth_headers,
+            json={"report_type": "complete"},
+        ),
+        201,
+    )
+
     deleted = _ok(client.delete(f"/api/v1/students/{removable_id}", headers=auth_headers))
     assert deleted["status"] == "deleted"
 
     with client.application.app_context():
         assert db.session.get(StudentProfile, removable_id) is None
         assert OutboundMessageDispatch.query.filter_by(student_id=removable_id).count() == 0
+        assert WorkoutPlan.query.filter_by(student_id=removable_id).count() == 0
+        assert PhysicalAssessment.query.filter_by(student_id=removable_id).count() == 0
+        assert GeneratedReport.query.filter_by(student_id=removable_id).count() == 0
 
 
 def test_file_upload_and_report_creation(client, auth_headers, monkeypatch, seeded_data):

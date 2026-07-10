@@ -29,6 +29,8 @@ class MealAnalysisResult:
     fats_grams: int | None
     summary_text: str
     guidance_text: str
+    items: list[dict] | None = None
+    confidence: float | None = None
 
 
 @dataclass

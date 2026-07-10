@@ -18,6 +18,8 @@ class StudentAutomationConfigInput(ApiSchema):
     reengagement_active: bool | None = None
     preferred_window_start: int | None = None
     preferred_window_end: int | None = None
+    nutrition_no_log_active: bool | None = None
+    nutrition_over_target_active: bool | None = None
 
 
 class SimulateInboundWhatsAppInput(ApiSchema):

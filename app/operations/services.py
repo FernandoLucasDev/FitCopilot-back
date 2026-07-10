@@ -133,9 +133,29 @@ def calculate_student_health_score(student: StudentProfile) -> OperationalScore:
     if len(meals) >= 2 or len(workouts) + len(completed_sessions) >= 2:
         reasons.append("ha sinais positivos recentes")
 
+    # Dimensao de wearable (atividade passiva) — so contribui quando ha dado conectado,
+    # o score continua valido e sem penalidade para quem nao conectou nenhum wearable.
+    from app.wearables.services import get_recent_wearable_metrics
+
+    wearable_metrics = get_recent_wearable_metrics(student, days=7)
+    factors["wearable_active_minutes_avg"] = wearable_metrics["recentAvgActiveMinutes"] if wearable_metrics else None
+    if wearable_metrics is not None:
+        recent_avg = wearable_metrics["recentAvgActiveMinutes"]
+        if recent_avg >= 30:
+            score += 12
+            reasons.append("boa atividade fisica registrada no wearable")
+        elif recent_avg >= 15:
+            score += 6
+            reasons.append("atividade fisica moderada no wearable")
+        elif recent_avg > 0:
+            reasons.append("atividade fisica baixa no wearable")
+        else:
+            score -= 6
+            reasons.append("sem atividade fisica registrada no wearable nos ultimos dias")
+
     score = max(0, min(100, score))
     previous = (
-        StudentHealthScore.query.filter_by(student_id=student.id)
+        StudentHealthScore.query.filter_by(student_id=student.id, score_type="operational")
         .order_by(StudentHealthScore.computed_at.desc())
         .first()
     )
@@ -167,18 +187,21 @@ def calculate_student_health_score(student: StudentProfile) -> OperationalScore:
 def recompute_and_persist_score(student: StudentProfile, *, emit: bool = True) -> StudentHealthScore:
     result = calculate_student_health_score(student)
     previous = (
-        StudentHealthScore.query.filter_by(student_id=student.id)
+        StudentHealthScore.query.filter_by(student_id=student.id, score_type="operational")
         .order_by(StudentHealthScore.computed_at.desc())
         .first()
     )
     previous_score = previous.raw_score if previous else None
     previous_level = previous.level if previous else None
-    snapshot = StudentHealthScore.query.filter_by(student_id=student.id, score_date=date.today()).first()
+    snapshot = StudentHealthScore.query.filter_by(
+        student_id=student.id, score_date=date.today(), score_type="operational"
+    ).first()
     if snapshot is None:
         snapshot = StudentHealthScore(
             account_id=student.account_id,
             student_id=student.id,
             score_date=date.today(),
+            score_type="operational",
             raw_score=result.score,
             level=result.status,
             trend=result.trend,
@@ -215,7 +238,7 @@ def recompute_and_persist_score(student: StudentProfile, *, emit: bool = True) -
 
 def latest_operational_score(student: StudentProfile) -> dict:
     snapshot = (
-        StudentHealthScore.query.filter_by(student_id=student.id)
+        StudentHealthScore.query.filter_by(student_id=student.id, score_type="operational")
         .order_by(StudentHealthScore.computed_at.desc())
         .first()
     )

@@ -1,5 +1,6 @@
 alembic==1.16.5
 celery==5.5.3
+cryptography==43.0.3
 email-validator==2.3.0
 faker==37.6.0
 factory-boy==3.3.3

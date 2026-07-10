@@ -30,3 +30,4 @@ class UpdateStudentInput(ApiSchema):
     main_objective_text: str | None = None
     notes: str | None = None
     status: str | None = None
+    daily_calorie_target: int | None = Field(default=None, ge=800, le=8000)

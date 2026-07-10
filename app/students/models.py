@@ -28,6 +28,7 @@ class StudentProfile(UUIDPrimaryKeyMixin, TimestampMixin, db.Model):
     current_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     goal_type: Mapped[str | None] = mapped_column(String(40))
     main_objective_text: Mapped[str | None] = mapped_column(String(255))
+    daily_calorie_target: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", index=True)
     adherence_score: Mapped[int] = mapped_column(Integer, nullable=False, default=70, index=True)
     adherence_trend: Mapped[str] = mapped_column(String(20), nullable=False, default="stable")
@@ -50,6 +51,8 @@ class StudentProfile(UUIDPrimaryKeyMixin, TimestampMixin, db.Model):
     workouts = relationship("WorkoutPlan", back_populates="student")
     workout_assignments = relationship("StudentWorkout", back_populates="student")
     workout_sessions = relationship("WorkoutSession", back_populates="student")
+    nutrition_plans = relationship("NutritionPlan", back_populates="student")
+    nutrition_plan_assignments = relationship("StudentNutritionPlan", back_populates="student")
     reports = relationship("GeneratedReport", back_populates="student")
     physical_assessments = relationship("PhysicalAssessment", backref="student")
 

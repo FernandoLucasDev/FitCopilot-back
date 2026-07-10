@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from flask import current_app
 from flask_jwt_extended import create_access_token, get_jwt_identity, verify_jwt_in_request
 
+from app.accounts.enterprise_services import resolve_effective_config
+from app.accounts.models import Account
 from app.common.api import ApiError
 from app.common.utils.time import ensure_aware
 from app.extensions import db
@@ -115,6 +117,8 @@ def build_student_portal_payload(student: StudentProfile) -> dict:
     last_session = sessions[0] if sessions else None
     progress = _build_student_progress(consistency=consistency, sessions=sessions)
     day_reading = _build_student_day_reading(consistency=consistency)
+    account = Account.query.filter_by(id=student.account_id).first()
+    brand = resolve_effective_config(account, "brand_config") if account else {}
     return {
         "student": {
             "id": str(student.id),
@@ -122,6 +126,8 @@ def build_student_portal_payload(student: StudentProfile) -> dict:
             "email": student.email,
             "goal": panel["header"]["goal"],
         },
+        "brand": brand,
+        "brandName": account.name if account else None,
         "workout": panel["workout"],
         "workoutConsistency": consistency,
         "workoutHistory": sessions,
@@ -138,6 +144,8 @@ def build_student_portal_payload(student: StudentProfile) -> dict:
         "activeWorkoutPlanId": str(active_workout.id) if active_workout else None,
         "files": panel["files"],
         "reports": panel["reports"],
+        "nutritionPlan": (panel.get("nutrition") or {}).get("plan"),
+        "wearable": panel.get("wearable"),
     }
 
 

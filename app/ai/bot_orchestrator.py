@@ -11,6 +11,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.ai.local_agent import fitcopilot_agent
 from app.extensions import db
+from app.nutrition.services import evaluate_nutrition_automation, recompute_and_persist_food_score
 from app.operations.services import emit_event, evaluate_retention_automation, recompute_and_persist_score
 from app.students.models import StudentDailySignal, StudentDailySummary, StudentInteraction, StudentProfile
 from app.workouts.services import (
@@ -244,6 +245,9 @@ def _record_signal(student: StudentProfile, *, signal_type: str, title: str, bod
 def _sync_student_operations(student: StudentProfile) -> None:
     recompute_and_persist_score(student)
     evaluate_retention_automation(student)
+    if getattr(student.account, "professional_vertical", None) == "nutricionista":
+        recompute_and_persist_food_score(student)
+        evaluate_nutrition_automation(student)
 
 
 def _meal_signals_today(student: StudentProfile) -> list[StudentDailySignal]:
@@ -377,6 +381,18 @@ def _format_total_calories(student: StudentProfile) -> str:
     return f"Total estimado do dia até agora: entre {min_total} e {max_total} kcal."
 
 
+def _format_calorie_target_progress(student: StudentProfile) -> str | None:
+    target = student.daily_calorie_target
+    if not target:
+        return None
+    min_total, max_total = _daily_calorie_range(student)
+    consumed = max_total if max_total else min_total
+    if not consumed:
+        return None
+    pct = round((consumed / target) * 100)
+    return f"Você consumiu {pct}% da sua meta de {target} kcal hoje."
+
+
 def _format_macros(protein: int | None, carbs: int | None, fats: int | None) -> str:
     parts = []
     if protein is not None:
@@ -392,6 +408,16 @@ def _daily_nutrition_guidance(student: StudentProfile, analysis) -> str:
     totals = _daily_macro_totals(student)
     tips: list[str] = []
     goal = (student.main_objective_text or "").lower()
+    target = student.daily_calorie_target
+    if target:
+        min_total, max_total = _daily_calorie_range(student)
+        consumed = max_total if max_total else min_total
+        if consumed:
+            remaining = target - consumed
+            if remaining <= 0:
+                tips.append("você já bateu a meta calórica de hoje — vale priorizar algo mais leve se ainda for comer")
+            elif remaining <= target * 0.15:
+                tips.append("está quase na meta calórica de hoje — considere fechar o dia com uma refeição mais leve")
     if totals["protein"] < 80:
         tips.append("tenta puxar mais proteína nas próximas refeições")
     if ("massa" in goal or "hipertrof" in goal) and totals["carbs"] < 160:
@@ -599,6 +625,21 @@ def _is_image_message(message_type: str) -> bool:
     return message_type in {"image", "imageMessage", "media"}
 
 
+def _link_recent_meal_photo(student: StudentProfile):
+    from app.files.models import StudentFile
+
+    cutoff = utcnow() - timedelta(minutes=30)
+    return (
+        StudentFile.query.filter(
+            StudentFile.student_id == student.id,
+            StudentFile.file_category == "meal_photo",
+            StudentFile.uploaded_at >= cutoff,
+        )
+        .order_by(StudentFile.uploaded_at.desc())
+        .first()
+    )
+
+
 def _handle_meal(student: StudentProfile, text: str, *, message_type: str, metadata: dict | None = None) -> BotReply:
     metadata = metadata or {}
     if _is_image_message(message_type) and not text.strip():
@@ -657,6 +698,7 @@ def _handle_meal(student: StudentProfile, text: str, *, message_type: str, metad
     if calorie_range and estimated_calories is not None:
         estimated_calories = round((calorie_range[0] + calorie_range[1]) / 2)
     _record_interaction(student, title="Refeição recebida no WhatsApp", body=text)
+    linked_photo = _link_recent_meal_photo(student)
     _record_signal(
         student,
         signal_type="meal",
@@ -669,17 +711,23 @@ def _handle_meal(student: StudentProfile, text: str, *, message_type: str, metad
             "carbs_grams": analysis.carbs_grams,
             "fats_grams": analysis.fats_grams,
             "message_type": message_type,
-            "linked_photo": bool(metadata.get("pendingMealPhoto")),
+            "linked_photo": bool(metadata.get("pendingMealPhoto")) or linked_photo is not None,
+            "items": analysis.items,
+            "confidence": analysis.confidence,
+            "photo_file_id": str(linked_photo.id) if linked_photo else None,
+            "photo_url": linked_photo.file_url if linked_photo else None,
         },
     )
     _sync_student_operations(student)
     db.session.commit()
     macros_text = _format_macros(analysis.protein_grams, analysis.carbs_grams, analysis.fats_grams)
     guidance_text = _daily_nutrition_guidance(student, analysis)
+    target_progress_text = _format_calorie_target_progress(student)
     reply = (
         f"Registrei sua refeição com {_format_calories(estimated_calories, calorie_range)} 🍽️\n"
-        f"{_format_total_calories(student)}\n\n"
-        f"{macros_text}\n"
+        f"{_format_total_calories(student)}\n"
+        + (f"{target_progress_text}\n" if target_progress_text else "")
+        + f"\n{macros_text}\n"
         f"{guidance_text}"
     )
     return BotReply(

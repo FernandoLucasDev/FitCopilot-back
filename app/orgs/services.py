@@ -20,7 +20,17 @@ from app.integrations.core_email import core_email_gateway
 from app.integrations.core_client import core_client
 
 
-FITCOPILOT_ROLES = {"OWNER", "ADMIN", "TRAINER", "NUTRITIONIST", "STAFF", "VIEWER"}
+FITCOPILOT_ROLES = {
+    "OWNER",
+    "ADMIN",
+    "TRAINER",
+    "NUTRITIONIST",
+    "STAFF",
+    "VIEWER",
+    "NETWORK_OWNER",
+    "UNIT_MANAGER",
+    "PROFESSIONAL",
+}
 CORE_ROLE_BY_LOCAL = {
     "OWNER": "OWNER",
     "ADMIN": "ADMIN",
@@ -28,6 +38,9 @@ CORE_ROLE_BY_LOCAL = {
     "NUTRITIONIST": "PARALEGAL",
     "STAFF": "PARALEGAL",
     "VIEWER": "VIEWER",
+    "NETWORK_OWNER": "OWNER",
+    "UNIT_MANAGER": "ADMIN",
+    "PROFESSIONAL": "LAWYER",
 }
 LOCAL_ROLE_BY_CORE = {
     "OWNER": "OWNER",
@@ -101,8 +114,11 @@ def ensure_local_account_for_org(org: dict[str, Any]) -> Account:
     org_id = str(org["id"])
     account = Account.query.filter_by(external_org_id=org_id, deleted_at=None).first()
     if account:
-        account.name = org.get("name") or account.name
-        account.slug = org.get("slug") or account.slug
+        # Fit e a fonte de verdade de name/slug pra contas ja existentes localmente
+        # (workspace, rede, unidade) — o Core so preenche esses campos na criacao
+        # (abaixo). Sobrescrever aqui teria efeito colateral operacional ruim: slug
+        # e usado em onboarding CSV (unit_slug), links internos, etc. Ver
+        # agentes-talk.md 2026-07-09 pra contexto completo.
         return account
 
     base_slug = slugify(org.get("slug") or org.get("name") or "workspace")
@@ -125,6 +141,9 @@ def ensure_local_account_for_org(org: dict[str, Any]) -> Account:
     return account
 
 
+ENTERPRISE_ONLY_ROLES = {"NETWORK_OWNER", "UNIT_MANAGER", "PROFESSIONAL"}
+
+
 def sync_core_membership(user: User, row: dict[str, Any]) -> AccountMembership:
     item = normalize_org_membership(row)
     account = ensure_local_account_for_org(item)
@@ -134,7 +153,12 @@ def sync_core_membership(user: User, row: dict[str, Any]) -> AccountMembership:
         db.session.add(membership)
     membership.external_org_id = item["id"]
     membership.external_member_id = item.get("memberId")
-    membership.role = item["role"]
+    # Core nao tem vocabulario pra NETWORK_OWNER/UNIT_MANAGER/PROFESSIONAL (LOCAL_ROLE_BY_CORE
+    # so conhece os papeis genericos). Se o papel local ja e um papel exclusivo de enterprise,
+    # preservamos — sincronizar cegamente aqui rebaixaria NETWORK_OWNER/UNIT_MANAGER/PROFESSIONAL
+    # de volta para OWNER/ADMIN/TRAINER a cada login.
+    if membership.role not in ENTERPRISE_ONLY_ROLES:
+        membership.role = item["role"]
     membership.status = item["status"]
     membership.can_manage_billing = bool(item.get("canManageBilling"))
     membership.permissions_json = item.get("permissions") or {}
@@ -539,8 +563,8 @@ def _require_local_manager(user: User, account: Account, *, allow_read: bool = F
     membership = AccountMembership.query.filter_by(account_id=account.id, user_id=user.id, status="ACTIVE", deleted_at=None).first()
     if not membership:
         raise ApiError("Voce nao faz parte deste workspace", HTTPStatus.FORBIDDEN)
-    if membership.role in {"OWNER", "ADMIN"}:
+    if membership.role in {"OWNER", "ADMIN", "NETWORK_OWNER", "UNIT_MANAGER"}:
         return membership
-    if allow_read and membership.role in {"TRAINER", "NUTRITIONIST", "STAFF", "VIEWER"}:
+    if allow_read and membership.role in {"TRAINER", "NUTRITIONIST", "STAFF", "VIEWER", "PROFESSIONAL"}:
         return membership
     raise ApiError("Sem permissao para gerenciar membros", HTTPStatus.FORBIDDEN)

@@ -77,8 +77,22 @@ def create_app(config_object: type[Settings] | None = None) -> Flask:
 
         ai_provider = FakeAIProvider()
 
+    if settings.WEARABLE_PROVIDER == "strava":
+        from app.wearables.providers.strava_provider import StravaWearableProvider
+
+        wearable_provider = StravaWearableProvider(
+            client_id=settings.STRAVA_CLIENT_ID,
+            client_secret=settings.STRAVA_CLIENT_SECRET,
+            redirect_uri=settings.STRAVA_REDIRECT_URI,
+        )
+    else:
+        from app.wearables.providers.fake_provider import FakeWearableProvider
+
+        wearable_provider = FakeWearableProvider(callback_url=settings.STRAVA_REDIRECT_URI or "")
+
     app.extensions["storage_provider"] = storage
     app.extensions["ai_provider"] = ai_provider
+    app.extensions["wearable_provider"] = wearable_provider
 
     configure_celery(app)
     register_error_handlers(app)
@@ -99,12 +113,15 @@ def create_test_app() -> Flask:
 
 
 def register_blueprints(app: Flask) -> None:
+    from app.accounts.routes import accounts_bp
     from app.auth.routes import auth_bp
     from app.files.routes import files_bp
     from app.billing.routes import billing_bp
     from app.ai.routes import ai_bp
+    from app.integrations.academy.routes import academy_bp
     from app.insights.routes import insights_bp
     from app.messaging.routes import messaging_bp
+    from app.nutrition.routes import nutrition_bp
     from app.overview.routes import overview_bp
     from app.orgs.routes import orgs_bp
     from app.physical.routes import physical_bp
@@ -115,8 +132,10 @@ def register_blueprints(app: Flask) -> None:
     from app.whatsapp.routes import whatsapp_bp
     from app.workouts.routes import workouts_bp
     from app.referral.routes import referral_bp
+    from app.wearables.routes import wearables_bp
 
     for blueprint in [
+        accounts_bp,
         auth_bp,
         overview_bp,
         orgs_bp,
@@ -127,10 +146,13 @@ def register_blueprints(app: Flask) -> None:
         workouts_bp,
         insights_bp,
         messaging_bp,
+        nutrition_bp,
         physical_bp,
         reports_bp,
         whatsapp_bp,
         ai_bp,
+        academy_bp,
+        wearables_bp,
         system_bp,
         referral_bp,
     ]:
@@ -152,6 +174,14 @@ def configure_celery(app: Flask) -> None:
             "fitcopilot-check-pending-workout-sessions": {
                 "task": "check_pending_workout_sessions_job",
                 "schedule": 600.0,
+            },
+            "fitcopilot-evaluate-nutrition-automations": {
+                "task": "evaluate_nutrition_automations_job",
+                "schedule": crontab(hour=app.config.get("WHATSAPP_DAILY_REPORT_HOUR", 20), minute=15),
+            },
+            "fitcopilot-sync-wearable-data": {
+                "task": "sync_wearable_data_job",
+                "schedule": crontab(hour=5, minute=0),
             },
         },
     )

@@ -18,6 +18,7 @@ from app.whatsapp.services import (
     send_manual_whatsapp_message,
     send_professional_note_whatsapp_message,
     send_onboarding_message,
+    send_nutrition_plan_of_day,
     send_suggested_message,
     send_workout_of_day,
     student_whatsapp_status,
@@ -67,6 +68,15 @@ def send_student_workout(student_id):
     auth = current_auth()
     student = require_student(auth.account_id, student_id)
     dispatch = send_workout_of_day(student=student, actor_user_id=auth.user.id)
+    return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
+
+
+@whatsapp_bp.post("/students/<uuid:student_id>/whatsapp/send-nutrition-plan")
+@require_auth({"owner", "professional", "admin"})
+def send_student_nutrition_plan(student_id):
+    auth = current_auth()
+    student = require_student(auth.account_id, student_id)
+    dispatch = send_nutrition_plan_of_day(student=student, actor_user_id=auth.user.id)
     return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
 
 

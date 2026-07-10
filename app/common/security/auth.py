@@ -18,6 +18,7 @@ class AuthContext:
     account_id: uuid.UUID | None
     organization_id: str | None = None
     member_role: str | None = None
+    enterprise_scope: object | None = None
 
 
 def require_auth(roles: set[str] | None = None):
@@ -49,15 +50,23 @@ def require_auth(roles: set[str] | None = None):
                     status="ACTIVE",
                     deleted_at=None,
                 ).first()
-                if membership is None:
-                    raise ApiError("Voce nao faz parte deste workspace", HTTPStatus.FORBIDDEN)
+                if membership is not None:
+                    member_role = membership.role
+                else:
+                    # Sem membership direta: pode ainda ser um NETWORK_OWNER acessando uma
+                    # unidade da propria rede (ex.: botao "Ver unidade" do dashboard de rede).
+                    from app.accounts.enterprise_services import resolve_enterprise_scope
+
+                    scope = resolve_enterprise_scope(user, account)
+                    if scope.level == "none":
+                        raise ApiError("Voce nao faz parte deste workspace", HTTPStatus.FORBIDDEN)
+                    member_role = scope.role
                 account_id = account.id
                 organization_id = str(account.external_org_id or account.id)
-                member_role = membership.role
                 if roles:
                     if member_role == "VIEWER" and request.method not in {"GET", "HEAD", "OPTIONS"}:
                         raise ApiError("Perfil somente leitura nao pode alterar este workspace", HTTPStatus.FORBIDDEN)
-                    if roles <= {"owner", "admin"} and member_role not in {"OWNER", "ADMIN"}:
+                    if roles <= {"owner", "admin"} and member_role not in {"OWNER", "ADMIN", "NETWORK_OWNER", "UNIT_MANAGER"}:
                         raise ApiError("Apenas gestores do workspace podem acessar esta area", HTTPStatus.FORBIDDEN)
 
             g.auth = AuthContext(user=user, account_id=account_id, organization_id=organization_id, member_role=member_role)
@@ -73,3 +82,50 @@ def current_auth() -> AuthContext:
     if context is None:
         raise ApiError("Contexto de autenticação ausente", HTTPStatus.UNAUTHORIZED)
     return context
+
+
+def require_enterprise_role(*, network_owner: bool = False, unit_manager: bool = False):
+    """Guards enterprise (rede/unidade) endpoints. Resolves the account from X-ORG-ID
+    (falling back to the user's own account) and checks the caller's role against the
+    account hierarchy — including a NETWORK_OWNER membership on the parent network of
+    a unit account.
+    """
+
+    def decorator(fn):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            from app.accounts.enterprise_services import resolve_enterprise_scope
+            from app.accounts.models import Account
+
+            verify_jwt_in_request()
+            identity = get_jwt_identity()
+            claims = get_jwt()
+            user = User.query.filter_by(id=identity, deleted_at=None).first()
+            if user is None or not user.is_active:
+                raise ApiError("Usuário inválido", HTTPStatus.UNAUTHORIZED)
+
+            organization_id = request.headers.get("X-ORG-ID")
+            account = None
+            if organization_id:
+                from app.orgs.services import account_for_org_id
+
+                account = account_for_org_id(organization_id)
+            if account is None:
+                account_id = user.account_id or claims.get("account_id")
+                account = Account.query.filter_by(id=account_id, deleted_at=None).first() if account_id else None
+            if account is None:
+                raise ApiError("Workspace não encontrado", HTTPStatus.FORBIDDEN)
+
+            scope = resolve_enterprise_scope(user, account)
+            allowed = (network_owner and scope.level == "network") or (
+                unit_manager and scope.level in {"network", "unit"}
+            )
+            if not allowed:
+                raise ApiError("Sem permissão para acessar esta área enterprise", HTTPStatus.FORBIDDEN)
+
+            g.auth = AuthContext(user=user, account_id=account.id, organization_id=organization_id, member_role=scope.role, enterprise_scope=scope)
+            return fn(*args, **kwargs)
+
+        return wrapped
+
+    return decorator

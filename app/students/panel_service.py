@@ -6,6 +6,12 @@ from app.files.models import StudentFile
 from app.insights.models import AIInsight
 from app.messaging.models import SuggestedMessage
 from app.extensions import db
+from app.nutrition.plan_services import (
+    get_active_nutrition_plan_for_student,
+    list_student_nutrition_plans,
+    serialize_nutrition_plan,
+)
+from app.nutrition.services import latest_food_score, weekly_food_summary
 from app.operations.services import (
     build_student_timeline,
     evaluate_retention_automation,
@@ -24,6 +30,7 @@ from app.students.services import (
     get_student_access_status,
     serialize_student_list_item,
 )
+from app.wearables.services import serialize_wearable_summary
 from app.whatsapp.services import list_student_whatsapp_suggestions, list_whatsapp_history, student_whatsapp_status
 from app.workouts.services import list_student_sessions, list_student_workout_plans, serialize_workout_plan, summarize_workout_consistency
 
@@ -69,6 +76,19 @@ def get_student_panel(student) -> dict:
     physical_progress = latest_physical_progress(student.id)
     whatsapp_status = student_whatsapp_status(student)
     whatsapp_history = list_whatsapp_history(student)
+    is_nutrition_vertical = getattr(student.account, "professional_vertical", None) == "nutricionista"
+    nutrition_payload = (
+        {
+            "weeklySummary": weekly_food_summary(student),
+            "foodScore": latest_food_score(student),
+            "plan": serialize_nutrition_plan(get_active_nutrition_plan_for_student(student.id), include_assignment_summary=True),
+            "plans": list_student_nutrition_plans(account_id=student.account_id, student_id=student.id),
+        }
+        if is_nutrition_vertical
+        else None
+    )
+    if is_nutrition_vertical:
+        db.session.commit()
 
     suggested_message_text = (
         latest_summary.suggested_message_text
@@ -91,11 +111,14 @@ def get_student_panel(student) -> dict:
             "proteinGrams": (signal.payload_json or {}).get("protein_grams"),
             "carbsGrams": (signal.payload_json or {}).get("carbs_grams"),
             "fatsGrams": (signal.payload_json or {}).get("fats_grams"),
+            "items": (signal.payload_json or {}).get("items"),
+            "confidence": (signal.payload_json or {}).get("confidence"),
+            "photoUrl": (signal.payload_json or {}).get("photo_url"),
         }
         for signal in today_signals
         if signal.signal_type in {"meal", "workout"}
     ][:4]
-    today_metrics = _build_today_metrics(today_meals, today_signals)
+    today_metrics = _build_today_metrics(today_meals, today_signals, student.daily_calorie_target)
     today_reading = _build_today_reading(today_metrics, latest_summary.ai_reading_text if latest_summary else None)
     today_impact = _build_today_impact(today_metrics, latest_summary.suggested_adjustment_text if latest_summary else None, workout_consistency)
     smart_insight = today_reading if today_metrics["mealsCount"] > 0 else (latest_summary.ai_reading_text if latest_summary else score.insight)
@@ -148,6 +171,7 @@ def get_student_panel(student) -> dict:
             "sex": student.sex,
             "heightCm": float(student.height_cm) if student.height_cm is not None else None,
             "currentWeightKg": float(student.current_weight_kg) if student.current_weight_kg is not None else None,
+            "dailyCalorieTarget": student.daily_calorie_target,
         },
         "workout": serialize_workout_plan(workout),
         "workoutPlans": workout_plans,
@@ -214,6 +238,8 @@ def get_student_panel(student) -> dict:
             for item in signals
         ],
         "timeline": build_student_timeline(student),
+        "nutrition": nutrition_payload,
+        "wearable": serialize_wearable_summary(student),
     }
 
 
@@ -225,7 +251,9 @@ def _build_workout_action(consistency: dict) -> str:
     return "Acompanhar a proxima sessao e validar se a ficha continua aderente a rotina."
 
 
-def _build_today_metrics(today_meals: list[dict], today_signals: list[StudentDailySignal]) -> dict:
+def _build_today_metrics(
+    today_meals: list[dict], today_signals: list[StudentDailySignal], calorie_target: int | None = None
+) -> dict:
     meal_items = [item for item in today_meals if item["ok"]]
     calories_min = 0
     calories_max = 0
@@ -249,6 +277,10 @@ def _build_today_metrics(today_meals: list[dict], today_signals: list[StudentDai
         fats += int(meal.get("fatsGrams") or 0)
 
     workouts_count = sum(1 for signal in today_signals if signal.signal_type == "workout")
+    calories_consumed = calories_max if calories_max else (calories_min if calories_min else None)
+    calorie_pct = None
+    if calorie_target and calories_consumed is not None:
+        calorie_pct = round((calories_consumed / calorie_target) * 100)
     return {
         "mealsCount": len(meal_items),
         "signalsCount": len(today_signals),
@@ -258,6 +290,8 @@ def _build_today_metrics(today_meals: list[dict], today_signals: list[StudentDai
         "proteinGrams": protein if protein else None,
         "carbsGrams": carbs if carbs else None,
         "fatsGrams": fats if fats else None,
+        "calorieTargetKcal": calorie_target,
+        "caloriePct": calorie_pct,
     }
 
 

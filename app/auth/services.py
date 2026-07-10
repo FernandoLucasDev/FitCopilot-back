@@ -34,6 +34,15 @@ def _generate_code() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
+def _vertical_from_professional_type(professional_type: str | None) -> str:
+    normalized = (professional_type or "").strip().lower()
+    if normalized in {"nutritionist", "nutricionista"}:
+        return "nutricionista"
+    if normalized == "academia":
+        return "academia"
+    return "personal_trainer"
+
+
 def register_account_and_owner(data) -> tuple[User, str]:
     if User.query.filter_by(email=data.email).first():
         raise ApiError("Já existe usuário com esse email", HTTPStatus.CONFLICT)
@@ -53,6 +62,7 @@ def register_account_and_owner(data) -> tuple[User, str]:
         email=data.account_email,
         phone=data.account_phone,
         settings_json={"workspace_theme": "fitcopilot", "student_panel_mode": "assistant"},
+        professional_vertical=_vertical_from_professional_type(data.professional_type),
     )
     db.session.add(account)
     db.session.flush()
@@ -145,11 +155,20 @@ def request_professional_password_reset(*, email: str, requested_by_ip: str | No
 
     if user.core_access_token:
         try:
+            from app.accounts.enterprise_services import resolve_effective_config
+
+            brand = resolve_effective_config(user.account, "brand_config") if user.account else {}
+            brand_name = brand.get("botName") or "FitCopilot"
             core_email_gateway.send_html_email(
                 access_token=user.core_access_token,
                 to_email=email,
-                subject="Código para redefinir sua senha FitCopilot",
-                html_content=_build_professional_reset_html(user.full_name, code),
+                subject=f"Código para redefinir sua senha {brand_name}",
+                html_content=_build_professional_reset_html(
+                    user.full_name,
+                    code,
+                    brand_name=brand_name,
+                    primary_color=brand.get("primaryColor") or "#111827",
+                ),
             )
             challenge.delivery_status = "sent"
         except Exception:
@@ -193,6 +212,12 @@ def issue_token(user: User) -> str:
     return create_access_token(identity=str(user.id), additional_claims={"account_id": str(user.account_id) if user.account_id else None})
 
 
+def _account_summary(account: Account) -> dict:
+    from app.accounts.services import serialize_account
+
+    return serialize_account(account)
+
+
 def build_auth_payload(user: User, token: str | None = None) -> dict:
     professional = user.professional_profile
     account = user.account
@@ -210,15 +235,7 @@ def build_auth_payload(user: User, token: str | None = None) -> dict:
             "role": user.role,
             "avatarUrl": user.avatar_url,
         },
-        "account": None
-        if account is None
-        else {
-            "id": str(account.id),
-            "name": account.name,
-            "slug": account.slug,
-            "timezone": account.timezone,
-            "planCode": account.current_plan_code,
-        },
+        "account": None if account is None else _account_summary(account),
         "professionalProfile": None
         if professional is None
         else {
@@ -235,13 +252,13 @@ def build_auth_payload(user: User, token: str | None = None) -> dict:
     }
 
 
-def _build_professional_reset_html(full_name: str, code: str) -> str:
+def _build_professional_reset_html(full_name: str, code: str, *, brand_name: str = "FitCopilot", primary_color: str = "#111827") -> str:
     first_name = (full_name or "profissional").split()[0]
     return f"""
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;background:#0f172a;color:#e2e8f0;padding:24px;border-radius:16px;">
-      <h2 style="margin:0 0 8px 0;">Redefinição de senha FitCopilot</h2>
+      <h2 style="margin:0 0 8px 0;">Redefinição de senha {brand_name}</h2>
       <p style="margin:0 0 18px 0;">Olá {first_name}, use o código abaixo para criar uma nova senha.</p>
-      <div style="font-size:32px;letter-spacing:8px;font-weight:700;background:#111827;border-radius:12px;padding:16px;text-align:center;">{code}</div>
+      <div style="font-size:32px;letter-spacing:8px;font-weight:700;background:{primary_color};border-radius:12px;padding:16px;text-align:center;">{code}</div>
       <p style="margin-top:18px;font-size:12px;color:#94a3b8;">Esse código expira em 10 minutos. Se você não pediu isso, ignore este e-mail.</p>
     </div>
     """

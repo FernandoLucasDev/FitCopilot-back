@@ -81,6 +81,31 @@ def create_student_file(*, account_id, student_id, actor_user_id, title: str, fi
     return student_file
 
 
+def save_meal_photo(*, student, content: bytes, mime_type: str) -> StudentFile:
+    storage = current_app.extensions["storage_provider"]
+    filename = f"meal-{utcnow().strftime('%Y%m%d%H%M%S')}.{'png' if 'png' in mime_type else 'jpg'}"
+    stored = storage.save(f"accounts/{student.account_id}/students/{student.id}/meals", filename, content, mime_type)
+
+    uploader_id = student.primary_professional.user_id
+    student_file = StudentFile(
+        account_id=student.account_id,
+        student_id=student.id,
+        uploaded_by_user_id=uploader_id,
+        file_category="meal_photo",
+        title=f"Foto de refeição — {utcnow().strftime('%d/%m/%Y %H:%M')}",
+        original_filename=filename,
+        storage_key=stored.storage_key,
+        file_url=stored.file_url,
+        mime_type=stored.mime_type,
+        file_size_bytes=stored.size,
+        extraction_status="completed",
+        uploaded_at=utcnow(),
+    )
+    db.session.add(student_file)
+    db.session.flush()
+    return student_file
+
+
 def serialize_file(item: StudentFile) -> dict:
     return {
         "id": str(item.id),

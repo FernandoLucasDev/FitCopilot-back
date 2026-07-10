@@ -13,6 +13,7 @@ from app.extensions import db
 from app.integrations.core_messaging_client import core_messaging_client
 from app.jobs.services import create_audit_log, create_background_job
 from app.messaging.models import SuggestedMessage
+from app.nutrition.plan_services import get_active_nutrition_plan_for_student, serialize_nutrition_plan
 from app.operations.services import emit_event, evaluate_retention_automation, recompute_and_persist_score
 from app.students.models import StudentDailySignal, StudentInteraction, StudentProfile
 from app.students.services import require_student
@@ -125,9 +126,8 @@ def _dispatch_status_payload(item: OutboundMessageDispatch) -> dict:
 
 
 def get_or_create_student_automations(student: StudentProfile) -> list[WhatsAppAutomationRule]:
-    rules = WhatsAppAutomationRule.query.filter_by(account_id=student.account_id).all()
-    if rules:
-        return rules
+    existing_rules = WhatsAppAutomationRule.query.filter_by(account_id=student.account_id).all()
+    existing_rule_types = {rule.rule_type for rule in existing_rules}
     defaults = [
         WhatsAppAutomationRule(
             account_id=student.account_id,
@@ -166,9 +166,37 @@ def get_or_create_student_automations(student: StudentProfile) -> list[WhatsAppA
             template_config_json={},
         ),
     ]
-    db.session.add_all(defaults)
+    if getattr(student.account, "professional_vertical", None) == "nutricionista":
+        defaults.extend(
+            [
+                WhatsAppAutomationRule(
+                    account_id=student.account_id,
+                    name="Sem refeição há 2 dias",
+                    rule_type="nutrition_no_log_2d",
+                    is_active=True,
+                    schedule_json={"threshold_days": 2},
+                    filters_json={},
+                    template_config_json={},
+                ),
+                WhatsAppAutomationRule(
+                    account_id=student.account_id,
+                    name="Meta calórica ultrapassada 3 dias seguidos",
+                    rule_type="nutrition_over_target_3d",
+                    is_active=True,
+                    schedule_json={"threshold_days": 3},
+                    filters_json={},
+                    template_config_json={},
+                ),
+            ]
+        )
+
+    missing_defaults = [rule for rule in defaults if rule.rule_type not in existing_rule_types]
+    if not missing_defaults:
+        return existing_rules
+
+    db.session.add_all(missing_defaults)
     db.session.commit()
-    return defaults
+    return existing_rules + missing_defaults
 
 
 def update_student_automations(*, student: StudentProfile, actor_user_id, data) -> list[dict]:
@@ -188,6 +216,10 @@ def update_student_automations(*, student: StudentProfile, actor_user_id, data) 
         if data.preferred_window_end is not None:
             filters["preferred_window_end"] = data.preferred_window_end
         rules["daily_checkin"].filters_json = filters
+    if data.nutrition_no_log_active is not None and "nutrition_no_log_2d" in rules:
+        rules["nutrition_no_log_2d"].is_active = data.nutrition_no_log_active
+    if data.nutrition_over_target_active is not None and "nutrition_over_target_3d" in rules:
+        rules["nutrition_over_target_3d"].is_active = data.nutrition_over_target_active
     create_audit_log(
         account_id=student.account_id,
         actor_user_id=actor_user_id,
@@ -479,6 +511,39 @@ def send_workout_of_day(*, student: StudentProfile, actor_user_id, enqueue: bool
         related_entity_id=plan.id,
         idempotency_key=_idempotency_key("workout-of-day", student, date.today().isoformat()),
         external_reference=f"student:{student.id}:workout_of_day:{date.today().isoformat()}",
+        payload=_build_text_payload(body=body),
+        enqueue=enqueue,
+    )
+
+
+def send_nutrition_plan_of_day(*, student: StudentProfile, actor_user_id, enqueue: bool = True) -> OutboundMessageDispatch:
+    plan = get_active_nutrition_plan_for_student(student.id)
+    if not plan:
+        raise ApiError("Paciente sem plano alimentar ativo para envio.", HTTPStatus.CONFLICT)
+    serialized = serialize_nutrition_plan(plan)
+    meals_count = len(serialized["meals"])
+    portal_url = str(current_app.config.get("STUDENT_PORTAL_URL") or "http://127.0.0.1:3000/aluno")
+    first_name = student.full_name.split()[0] if student.full_name else "paciente"
+    body = (
+        f"Oi, {first_name}! Seu plano alimentar de hoje já está pronto: {plan.title} 🥗\n\n"
+        f"São {meals_count} refeições planejadas. Abra o link para ver tudo detalhado:\n"
+        f"{portal_url}\n\n"
+        "Se pedir código, use seu e-mail cadastrado para entrar."
+    )
+    session = _upsert_session(
+        student=student,
+        flow="nutrition_plan_view",
+        step="portal_link_sent",
+        context={"plan_id": str(plan.id), "portal_url": portal_url},
+    )
+    return queue_whatsapp_dispatch(
+        student=student,
+        actor_user_id=actor_user_id,
+        message_category="nutrition_plan_delivery",
+        related_entity_type="nutrition_plan",
+        related_entity_id=plan.id,
+        idempotency_key=_idempotency_key("nutrition-plan-of-day", student, date.today().isoformat()),
+        external_reference=f"student:{student.id}:nutrition_plan_of_day:{date.today().isoformat()}",
         payload=_build_text_payload(body=body),
         enqueue=enqueue,
     )

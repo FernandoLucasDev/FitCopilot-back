@@ -104,6 +104,8 @@ class FakeAIProvider(AIProvider):
             fats_grams=fats,
             summary_text=f"Registrei sua refeição com cerca de {estimated_calories} kcal.",
             guidance_text="Se conseguir, mantenha boa hidratação e siga a próxima refeição sem pular. 💧",
+            items=[{"name": description.strip()[:60] or "Refeição", "quantity_estimate": "porção estimada", "calories": estimated_calories}],
+            confidence=0.55,
         )
 
     def moderate_media(self, *, content: bytes, mime_type: str, context: dict) -> MediaSafetyResult:

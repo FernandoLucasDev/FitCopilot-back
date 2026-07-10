@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from flask import Blueprint, request
 
+from app.accounts.enterprise_services import resolve_professional_scope_filter
 from app.common.api import success_response
 from app.common.request import parse_json
 from app.common.security.auth import current_auth, require_auth
@@ -30,6 +31,7 @@ def list_students():
                 account_id=auth.account_id,
                 search=request.args.get("search"),
                 status=request.args.get("status"),
+                primary_professional_id=resolve_professional_scope_filter(auth),
             )
         }
     )
