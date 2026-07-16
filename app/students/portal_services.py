@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import random
 import re
+from html import escape
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from types import SimpleNamespace
@@ -242,11 +243,29 @@ def _build_student_day_reading(*, consistency: dict) -> str:
 
 
 def _build_student_otp_html(student_name: str, code: str) -> str:
+    first_name = escape((student_name or "aluno").split()[0])
+    safe_code = escape(code)
     return f"""
-    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;background:#0f172a;color:#e2e8f0;padding:24px;border-radius:16px;">
-      <h2 style="margin:0 0 8px 0;">Seu codigo FitCopilot</h2>
-      <p style="margin:0 0 18px 0;">Ola {student_name.split()[0]}, use o codigo abaixo para entrar na sua area do aluno.</p>
-      <div style="font-size:32px;letter-spacing:8px;font-weight:700;background:#111827;border-radius:12px;padding:16px;text-align:center;">{code}</div>
-      <p style="margin-top:18px;font-size:12px;color:#94a3b8;">Esse codigo expira em 10 minutos.</p>
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background-color:#faf9f7;color:#1f1a17;padding:28px;border-radius:18px;border:1px solid #eadfd8;">
+      <div style="display:block;margin-bottom:24px;">
+        <div style="display:inline-block;background-color:#a63a22;color:#ffffff;border-radius:12px;padding:10px 12px;font-weight:700;">FC</div>
+        <span style="font-size:18px;font-weight:700;margin-left:10px;">FitCopilot</span>
+      </div>
+      <h2 style="margin:0 0 10px 0;font-size:24px;line-height:1.2;color:#1f1a17;">Seu acesso ao acompanhamento</h2>
+      <p style="margin:0 0 18px 0;font-size:15px;line-height:1.6;color:#665f5a;">
+        Oi, {first_name}. Use o codigo abaixo para entrar na sua area do aluno e acompanhar treinos, cargas, arquivos e orientacoes do seu profissional.
+      </p>
+      <div style="background-color:#ffffff;border:1px solid #eadfd8;border-radius:16px;padding:22px;text-align:center;margin:22px 0;">
+        <div style="font-size:12px;font-weight:700;letter-spacing:1.5px;color:#a63a22;text-transform:uppercase;">Codigo de acesso</div>
+        <div style="font-size:36px;letter-spacing:9px;font-weight:700;color:#1f1a17;margin-top:8px;">{safe_code}</div>
+      </div>
+      <p style="margin:0 0 14px 0;font-size:14px;line-height:1.6;color:#665f5a;">
+        Ele expira em 10 minutos. Se voce nao pediu esse codigo, pode ignorar este e-mail com tranquilidade.
+      </p>
+      <div style="background-color:#f1ebe7;border-radius:14px;padding:14px;margin-top:20px;">
+        <p style="margin:0;font-size:12px;line-height:1.5;color:#665f5a;">
+          Dica: depois de entrar, registre as cargas dos exercicios. Isso ajuda seu profissional a acompanhar sua evolucao com mais precisao.
+        </p>
+      </div>
     </div>
     """

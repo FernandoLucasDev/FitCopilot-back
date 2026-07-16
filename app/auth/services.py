@@ -4,6 +4,7 @@ import hashlib
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from html import escape
 from http import HTTPStatus
 
 import requests
@@ -253,13 +254,32 @@ def build_auth_payload(user: User, token: str | None = None) -> dict:
 
 
 def _build_professional_reset_html(full_name: str, code: str, *, brand_name: str = "FitCopilot", primary_color: str = "#111827") -> str:
-    first_name = (full_name or "profissional").split()[0]
+    first_name = escape((full_name or "profissional").split()[0])
+    safe_brand = escape(brand_name or "FitCopilot")
+    safe_code = escape(code)
+    safe_color = escape(primary_color or "#a63a22")
     return f"""
-    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;background:#0f172a;color:#e2e8f0;padding:24px;border-radius:16px;">
-      <h2 style="margin:0 0 8px 0;">Redefinição de senha {brand_name}</h2>
-      <p style="margin:0 0 18px 0;">Olá {first_name}, use o código abaixo para criar uma nova senha.</p>
-      <div style="font-size:32px;letter-spacing:8px;font-weight:700;background:{primary_color};border-radius:12px;padding:16px;text-align:center;">{code}</div>
-      <p style="margin-top:18px;font-size:12px;color:#94a3b8;">Esse código expira em 10 minutos. Se você não pediu isso, ignore este e-mail.</p>
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background-color:#faf9f7;color:#1f1a17;padding:28px;border-radius:18px;border:1px solid #eadfd8;">
+      <div style="display:block;margin-bottom:24px;">
+        <div style="display:inline-block;background-color:{safe_color};color:#ffffff;border-radius:12px;padding:10px 12px;font-weight:700;">FC</div>
+        <span style="font-size:18px;font-weight:700;margin-left:10px;">{safe_brand}</span>
+      </div>
+      <h2 style="margin:0 0 10px 0;font-size:24px;line-height:1.2;color:#1f1a17;">Redefinicao de senha</h2>
+      <p style="margin:0 0 18px 0;font-size:15px;line-height:1.6;color:#665f5a;">
+        Oi, {first_name}. Use o codigo abaixo para confirmar sua identidade e criar uma nova senha.
+      </p>
+      <div style="background-color:#ffffff;border:1px solid #eadfd8;border-radius:16px;padding:22px;text-align:center;margin:22px 0;">
+        <div style="font-size:12px;font-weight:700;letter-spacing:1.5px;color:{safe_color};text-transform:uppercase;">Codigo de seguranca</div>
+        <div style="font-size:36px;letter-spacing:9px;font-weight:700;color:#1f1a17;margin-top:8px;">{safe_code}</div>
+      </div>
+      <p style="margin:0 0 14px 0;font-size:14px;line-height:1.6;color:#665f5a;">
+        Esse codigo expira em 10 minutos. Se voce nao pediu essa alteracao, ignore este e-mail e sua senha continua igual.
+      </p>
+      <div style="background-color:#f1ebe7;border-radius:14px;padding:14px;margin-top:20px;">
+        <p style="margin:0;font-size:12px;line-height:1.5;color:#665f5a;">
+          Por seguranca, nunca compartilhe este codigo com outras pessoas.
+        </p>
+      </div>
     </div>
     """
 
