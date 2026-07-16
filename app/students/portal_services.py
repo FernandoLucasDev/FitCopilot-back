@@ -53,9 +53,21 @@ def request_student_otp(*, email: str, requested_by_ip: str | None = None) -> di
     db.session.add(challenge)
     db.session.flush()
 
+    delivery_channel = "none"
+    if student.phone:
+        try:
+            from app.whatsapp.services import send_student_otp_message
+
+            send_student_otp_message(student=student, code=code, challenge_id=challenge.id)
+            challenge.delivery_status = "sent"
+            delivery_channel = "whatsapp"
+        except Exception as exc:
+            current_app.logger.warning("student_otp_whatsapp_failed student_id=%s error=%s", student.id, exc)
+            challenge.delivery_status = "failed"
+
     account = student.account
     owner_user = account.users[0] if account and account.users else None
-    if owner_user and owner_user.core_access_token:
+    if challenge.delivery_status != "sent" and owner_user and owner_user.core_access_token:
         try:
             core_email_gateway.send_html_email(
                 access_token=owner_user.core_access_token,
@@ -64,13 +76,20 @@ def request_student_otp(*, email: str, requested_by_ip: str | None = None) -> di
                 html_content=_build_student_otp_html(student.full_name, code),
             )
             challenge.delivery_status = "sent"
+            delivery_channel = "email"
         except Exception:
             challenge.delivery_status = "failed"
-    else:
+    elif challenge.delivery_status != "sent":
         challenge.delivery_status = "debug"
+        delivery_channel = "debug"
     db.session.commit()
-    expose_debug_code = current_app.config.get("OTP_DEBUG_CODES_ENABLED") or challenge.delivery_status != "sent"
-    return {"status": "accepted", "expiresInSeconds": 600, "debugCode": code if expose_debug_code else None}
+    expose_debug_code = current_app.config.get("OTP_DEBUG_CODES_ENABLED") or challenge.delivery_status not in {"sent", "queued"}
+    return {
+        "status": "accepted",
+        "expiresInSeconds": 600,
+        "deliveryChannel": delivery_channel,
+        "debugCode": code if expose_debug_code else None,
+    }
 
 
 def verify_student_otp(*, email: str, code: str) -> dict:

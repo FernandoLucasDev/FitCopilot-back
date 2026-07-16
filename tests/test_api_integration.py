@@ -448,7 +448,10 @@ def test_workout_plan_creation_and_activation(client, auth_headers, seeded_data)
         assert archived_plan.status == "archived"
 
 
-def test_student_otp_flow(client, seeded_data):
+def test_student_otp_flow(client, seeded_data, monkeypatch):
+    from app.jobs import tasks
+
+    monkeypatch.setattr(tasks.send_whatsapp_message_job, "delay", lambda *args, **kwargs: None)
     email = seeded_data["student"].email
     student_id = str(seeded_data["student"].id)
 
@@ -459,7 +462,13 @@ def test_student_otp_flow(client, seeded_data):
 
     requested = _ok(client.post("/api/v1/student-auth/request-otp", json={"email": email}), 202)
     assert requested["status"] in {"accepted", "sent"}
+    assert requested["deliveryChannel"] == "whatsapp"
     code = requested["debugCode"]
+
+    with client.application.app_context():
+        dispatch = OutboundMessageDispatch.query.filter_by(student_id=student_id, message_category="student_otp").first()
+        assert dispatch is not None
+        assert code in dispatch.payload_json["text"]["body"]
 
     verified = _ok(client.post("/api/v1/student-auth/verify-otp", json={"email": email, "code": code}))
     assert verified["token"]

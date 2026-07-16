@@ -427,7 +427,7 @@ def send_onboarding_message(*, student: StudentProfile, actor_user_id, enqueue: 
     portal_url = str(current_app.config.get("STUDENT_PORTAL_URL") or "https://fitcopilot.com.br/aluno")
     login_hint = (
         f"\n\nSua área do aluno: {portal_url}\n"
-        f"Para entrar, use este e-mail: {student.email}. Você vai receber um código de acesso por e-mail."
+        f"Para entrar, use este e-mail: {student.email}. O código de acesso chega por aqui, no WhatsApp."
         if student.email
         else f"\n\nSua área do aluno: {portal_url}\nSe precisar acessar, peça para {professional_name} cadastrar seu e-mail."
     )
@@ -500,7 +500,7 @@ def send_workout_of_day(*, student: StudentProfile, actor_user_id, enqueue: bool
         f"Oi, {first_name}! Seu treino de hoje já está na sua ficha: {plan.title} 💪\n\n"
         f"São {exercises_count} exercícios. Abra o link para ver tudo detalhado e registrar a carga de cada exercício:\n"
         f"{portal_url}\n\n"
-        "Se pedir código, use seu e-mail cadastrado para entrar."
+        "Se pedir código, use seu e-mail cadastrado. Eu envio o acesso por aqui, no WhatsApp."
     )
     session = _upsert_session(student=student, flow="workout_execution", step="portal_link_sent", context={"plan_id": str(plan.id), "portal_url": portal_url})
     return queue_whatsapp_dispatch(
@@ -528,7 +528,7 @@ def send_nutrition_plan_of_day(*, student: StudentProfile, actor_user_id, enqueu
         f"Oi, {first_name}! Seu plano alimentar de hoje já está pronto: {plan.title} 🥗\n\n"
         f"São {meals_count} refeições planejadas. Abra o link para ver tudo detalhado:\n"
         f"{portal_url}\n\n"
-        "Se pedir código, use seu e-mail cadastrado para entrar."
+        "Se pedir código, use seu e-mail cadastrado. Eu envio o acesso por aqui, no WhatsApp."
     )
     session = _upsert_session(
         student=student,
@@ -811,6 +811,34 @@ def send_manual_whatsapp_message(*, student: StudentProfile, actor_user_id, mess
         idempotency_key=_idempotency_key("manual-message", student, str(uuid4())),
         external_reference=f"student:{student.id}:manual_message:{uuid4()}",
         payload=_build_text_payload(body=message_text, message_type=message_type),
+        enqueue=enqueue,
+    )
+
+
+def send_student_otp_message(*, student: StudentProfile, code: str, challenge_id, enqueue: bool = True) -> OutboundMessageDispatch:
+    phone = normalize_phone(student.phone)
+    if not phone:
+        raise ApiError("Aluno sem telefone valido para WhatsApp.", HTTPStatus.CONFLICT)
+    first_name = (student.full_name or "aluno").split()[0]
+    body = (
+        f"Oi, {first_name}! Seu codigo de acesso ao FitCopilot e: {code}\n\n"
+        "Ele expira em 10 minutos. Se voce nao pediu esse codigo, pode ignorar esta mensagem."
+    )
+    session = _upsert_session(
+        student=student,
+        flow="student_login_otp",
+        step="otp_sent",
+        context={"challenge_id": str(challenge_id)},
+    )
+    return queue_whatsapp_dispatch(
+        student=student,
+        actor_user_id=student.primary_professional.user_id if student.primary_professional else None,
+        message_category="student_otp",
+        related_entity_type="student_login_challenge",
+        related_entity_id=challenge_id,
+        idempotency_key=_idempotency_key("student-otp", student, str(challenge_id)),
+        external_reference=f"student:{student.id}:otp:{challenge_id}",
+        payload=_build_text_payload(body=body),
         enqueue=enqueue,
     )
 
