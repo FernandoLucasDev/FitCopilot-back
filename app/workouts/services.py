@@ -15,6 +15,15 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _short_text(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
 def create_workout_plan(*, account_id, student_id, actor_user_id, data) -> WorkoutPlan:
     linked_student_id = student_id or data.student_id
     student = require_student(account_id, linked_student_id) if linked_student_id else None
@@ -235,7 +244,7 @@ def create_workout_session(*, account_id, actor_user_id, data) -> WorkoutSession
                 session_id=session.id,
                 exercise_name=exercise.exercise_name,
                 sets_completed=exercise.sets_completed,
-                reps_completed=exercise.reps_completed,
+                reps_completed=_short_text(exercise.reps_completed, 60),
                 notes=exercise.notes,
             )
         )
@@ -278,7 +287,7 @@ def update_workout_session(*, account_id, actor_user_id, session_id, data) -> Wo
                 session_id=session.id,
                 exercise_name=exercise.exercise_name,
                 sets_completed=exercise.sets_completed,
-                reps_completed=exercise.reps_completed,
+                reps_completed=_short_text(exercise.reps_completed, 60),
                 notes=exercise.notes,
             )
         )
