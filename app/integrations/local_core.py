@@ -39,25 +39,25 @@ class LocalCoreGateway:
             "refresh_tokens": {},
             "plans": [
                 {
-                    "code": "starter",
+                    "code": "free",
                     "name": "Starter",
-                    "price": 49,
+                    "price": 0,
                     "description": "Para profissionais com carteira enxuta e acompanhamento proximo.",
                     "recommended": False,
-                    "limits": {"students": 10, "aiCredits": 50, "uploads": 15, "reports": 5},
+                    "limits": {"students": 5, "aiCredits": 100, "uploads": 10, "reports": 2},
                     "features": [
                         {"name": "Carteira operacional", "included": True},
                         {"name": "Leituras de IA do dia", "included": True},
-                        {"name": "Checkout e billing local", "included": True},
+                        {"name": "Checkout e billing local", "included": False},
                     ],
                 },
                 {
                     "code": "pro",
                     "name": "Pro",
-                    "price": 99,
+                    "price": 89,
                     "description": "Melhor equilibrio para acompanhamento frequente com IA pragmatica.",
                     "recommended": True,
-                    "limits": {"students": 40, "aiCredits": 300, "uploads": 100, "reports": 30},
+                    "limits": {"students": 30, "aiCredits": 2000, "uploads": 100, "reports": 30},
                     "features": [
                         {"name": "Workspace completo", "included": True},
                         {"name": "Painel agregado do aluno", "included": True},
@@ -65,16 +65,29 @@ class LocalCoreGateway:
                     ],
                 },
                 {
-                    "code": "scale",
-                    "name": "Scale",
-                    "price": 199,
+                    "code": "elite",
+                    "name": "Elite",
+                    "price": 149,
                     "description": "Operacao maior com mais margem de IA, relatorios e automacoes futuras.",
                     "recommended": False,
-                    "limits": {"students": 120, "aiCredits": 1000, "uploads": 500, "reports": 150},
+                    "limits": {"students": 9999, "aiCredits": 9999, "uploads": 500, "reports": 150},
                     "features": [
                         {"name": "Uso intensivo de IA", "included": True},
                         {"name": "Relatorios em escala", "included": True},
                         {"name": "Preparado para WhatsApp", "included": True},
+                    ],
+                },
+                {
+                    "code": "academia",
+                    "name": "Academia",
+                    "price": 349,
+                    "description": "Operacao multi-profissional com assentos incluidos para a equipe.",
+                    "recommended": False,
+                    "limits": {"students": 9999, "aiCredits": 9999, "uploads": 9999, "reports": 9999},
+                    "features": [
+                        {"name": "5 profissionais incluidos", "included": True},
+                        {"name": "Dashboard centralizado", "included": True},
+                        {"name": "Billing por assentos", "included": True},
                     ],
                 },
             ],
@@ -142,6 +155,14 @@ class LocalCoreGateway:
         if method == "GET" and normalized_path == "/billing/subscriptions/me":
             user = self._require_user_by_token(state, token)
             return self._subscription_payload(state, user["org_id"])
+        if method == "GET" and normalized_path == "/payments/config":
+            return {"publishable_key": "pk_test_local_fitcopilot", "mode": "mock"}
+        if method == "POST" and normalized_path == "/payments/setup-intent":
+            user = self._require_user_by_token(state, token)
+            return self._setup_intent(state, user["org_id"])
+        if method == "POST" and normalized_path == "/payments/setup-intent/confirm":
+            user = self._require_user_by_token(state, token)
+            return self._confirm_setup_intent(state, user["org_id"], payload)
         if method == "GET" and normalized_path == "/billing/entitlements/me":
             user = self._require_user_by_token(state, token)
             return self._entitlements_payload(state, user["org_id"])
@@ -154,6 +175,12 @@ class LocalCoreGateway:
             return self._portal(user["org_id"], payload)
         if normalized_path.endswith("/entitlements") and org_id:
             return self._entitlements_payload(state, org_id)
+        if normalized_path.endswith("/billing-summary") and org_id:
+            return self._subscription_payload(state, org_id)
+        if normalized_path.endswith("/setup-intent") and org_id:
+            return self._setup_intent(state, org_id)
+        if normalized_path.endswith("/setup-intent/confirm") and org_id:
+            return self._confirm_setup_intent(state, org_id, payload)
         if normalized_path.endswith("/plan-switch") and org_id:
             plan_code = payload.get("plan_code")
             return self._checkout(state, org_id, plan_code, payload)
@@ -226,7 +253,7 @@ class LocalCoreGateway:
             "name": name,
             "slug": slug,
             "owner_email": owner_email,
-            "plan_code": "starter",
+            "plan_code": "free",
             "students_used": 6,
             "ai_credits_used": 24,
             "uploads_used": 4,
@@ -315,6 +342,27 @@ class LocalCoreGateway:
             "org_id": org_id,
             "url": payload.get("return_url") or "http://localhost:3000/billing",
         }
+
+    def _setup_intent(self, state: dict[str, Any], org_id: str) -> dict[str, Any]:
+        org = state["orgs"][org_id]
+        setup_intent_id = f"seti_{secrets.token_hex(8)}"
+        org["pending_setup_intent"] = setup_intent_id
+        self._save_state(state)
+        return {
+            "client_secret": f"{setup_intent_id}_secret_local",
+            "setup_intent_id": setup_intent_id,
+            "mode": "mock",
+        }
+
+    def _confirm_setup_intent(self, state: dict[str, Any], org_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        org = state["orgs"][org_id]
+        setup_intent_id = str(payload.get("setup_intent_id") or "")
+        if not setup_intent_id or setup_intent_id != org.get("pending_setup_intent"):
+            raise ApiError("setup_intent_id invalido", HTTPStatus.BAD_REQUEST)
+        org["pending_setup_intent"] = None
+        self._save_state(state)
+        payment_method = dict(org.get("payment_method") or {})
+        return {"payment_method": payment_method, "mode": "mock"}
 
 
 local_core_gateway = LocalCoreGateway()

@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 
 
 class BillingGateway:
+    PLAN_ALIASES: dict[str, str] = {
+        "STARTER": "FREE",
+        "PREMIUM": "ELITE",
+        "SCALE": "ELITE",
+        "PRO_TESTE_199": "PRO",
+    }
+
     LOCAL_PLANS: list[dict[str, Any]] = [
         {
             "code": "FREE",
@@ -85,8 +92,12 @@ class BillingGateway:
         return bool(current_app.config.get("CORE_API_URL")) and current_app.config.get("CORE_PROXY_MODE") != "disabled"
 
     def _plan_by_code(self, code: str | None) -> dict[str, Any]:
-        normalized = str(code or "FREE").upper()
+        normalized = self._canonical_plan_code(code)
         return next((plan for plan in self.LOCAL_PLANS if plan["code"] == normalized), self.LOCAL_PLANS[0])
+
+    def _canonical_plan_code(self, code: str | None) -> str:
+        normalized = str(code or "FREE").strip().upper()
+        return self.PLAN_ALIASES.get(normalized, normalized)
 
     def _safe_core_request(self, *, fallback: Any, operation: str, **kwargs) -> Any:
         try:
@@ -147,7 +158,30 @@ class BillingGateway:
         )
         if isinstance(raw, dict):
             raw = raw.get("results") or raw.get("items") or raw.get("data") or self.LOCAL_PLANS
-        return [self._normalize_core_plan(item) for item in raw]
+        items = raw if isinstance(raw, list) else self.LOCAL_PLANS
+        normalized_by_code: dict[str, dict[str, Any]] = {}
+        priority_by_code: dict[str, tuple[int, int]] = {}
+        for item in items:
+            candidate = self._normalize_core_plan(item)
+            if not candidate:
+                continue
+            code = str(candidate["code"]).upper()
+            raw_code = str(item.get("code") or item.get("slug") or code).strip().upper()
+            priority = (
+                0 if self._canonical_plan_code(raw_code) == raw_code else 1,
+                0 if str(item.get("stripe_price_id") or "").strip() else 1,
+            )
+            if code not in normalized_by_code or priority < priority_by_code[code]:
+                normalized_by_code[code] = candidate
+                priority_by_code[code] = priority
+        normalized = list(normalized_by_code.values())
+        normalized.sort(
+            key=lambda item: next(
+                (index for index, plan in enumerate(self.LOCAL_PLANS) if plan["code"] == item["code"]),
+                len(self.LOCAL_PLANS),
+            )
+        )
+        return normalized or self.LOCAL_PLANS
 
     def get_subscription(self, *, token: str, org_id: str | None = None, plan_code: str | None = None):
         fallback = self._local_subscription(plan_code=plan_code)
@@ -156,15 +190,14 @@ class BillingGateway:
         if not token:
             return fallback
         if org_id:
-            entitlements = self._safe_core_request(
-                fallback=self._local_entitlements(plan_code=plan_code),
-                operation="org entitlements for subscription",
+            return self._safe_core_request(
+                fallback=fallback,
+                operation="org billing summary",
                 method="GET",
-                path=f"/orgs/{org_id}/entitlements/",
+                path=f"/orgs/{org_id}/billing-summary/",
                 token=token,
                 org_id=org_id,
             )
-            return self._subscription_from_entitlements(entitlements)
         return self._safe_core_request(
             fallback=fallback,
             operation="subscription",
@@ -268,12 +301,19 @@ class BillingGateway:
             )
         return core_client.request(method="POST", path="/payments/portal-session/", token=token)
 
-    def create_setup_intent(self, *, token: str):
+    def create_setup_intent(self, *, token: str, org_id: str | None = None):
         if not self._enabled():
             return {"client_secret": None, "setup_intent_id": None, "mode": "mock"}
+        if org_id:
+            return core_client.request(
+                method="POST",
+                path=f"/orgs/{org_id}/setup-intent/",
+                token=token,
+                org_id=org_id,
+            )
         return core_client.request(method="POST", path="/payments/setup-intent/", token=token)
 
-    def confirm_setup_intent(self, *, token: str, setup_intent_id: str):
+    def confirm_setup_intent(self, *, token: str, setup_intent_id: str, org_id: str | None = None):
         if not self._enabled():
             return {
                 "mode": "mock",
@@ -284,6 +324,14 @@ class BillingGateway:
                     "exp_year": 2030,
                 },
             }
+        if org_id:
+            return core_client.request(
+                method="POST",
+                path=f"/orgs/{org_id}/setup-intent/confirm/",
+                token=token,
+                org_id=org_id,
+                json={"setup_intent_id": setup_intent_id},
+            )
         return core_client.request(
             method="POST",
             path="/payments/setup-intent/confirm/",
@@ -291,8 +339,13 @@ class BillingGateway:
             json={"setup_intent_id": setup_intent_id},
         )
 
-    def _normalize_core_plan(self, item: dict[str, Any]) -> dict[str, Any]:
-        code = str(item.get("code") or item.get("slug") or "FREE").upper()
+    def _normalize_core_plan(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        code = self._canonical_plan_code(item.get("code") or item.get("slug") or "FREE")
+        if code not in {plan["code"] for plan in self.LOCAL_PLANS}:
+            return None
+        stripe_price_id = str(item.get("stripe_price_id") or "").strip()
+        if code != "FREE" and "stripe_price_id" in item and not stripe_price_id:
+            return None
         local = self._plan_by_code(code)
         return {
             **local,

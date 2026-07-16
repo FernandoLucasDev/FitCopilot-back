@@ -79,15 +79,20 @@ def billing_portal():
 @billing_bp.post("/billing/setup-intent")
 @require_auth({"owner", "professional", "admin"})
 def billing_setup_intent():
-    return success_response(billing_gateway.create_setup_intent(token=_core_token()))
+    auth = current_auth()
+    org_id = request.headers.get("X-ORG-ID") or (auth.user.account.external_org_id if auth.user.account else None)
+    return success_response(billing_gateway.create_setup_intent(token=_core_token(), org_id=org_id))
 
 
 @billing_bp.post("/billing/setup-intent/confirm")
 @require_auth({"owner", "professional", "admin"})
 def billing_confirm_setup_intent():
+    auth = current_auth()
     payload = request.get_json() or {}
+    org_id = request.headers.get("X-ORG-ID") or (auth.user.account.external_org_id if auth.user.account else None)
     result = billing_gateway.confirm_setup_intent(
         token=_core_token(),
         setup_intent_id=str(payload.get("setup_intent_id") or ""),
+        org_id=org_id,
     )
     return success_response(result)
