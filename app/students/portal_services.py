@@ -54,31 +54,40 @@ def request_student_otp(*, email: str, requested_by_ip: str | None = None) -> di
     db.session.flush()
 
     delivery_channel = "none"
+    whatsapp_queued = False
+    email_sent = False
     if student.phone:
         try:
             from app.whatsapp.services import send_student_otp_message
 
             send_student_otp_message(student=student, code=code, challenge_id=challenge.id)
-            challenge.delivery_status = "sent"
+            challenge.delivery_status = "queued"
             delivery_channel = "whatsapp"
+            whatsapp_queued = True
         except Exception as exc:
             current_app.logger.warning("student_otp_whatsapp_failed student_id=%s error=%s", student.id, exc)
             challenge.delivery_status = "failed"
 
     account = student.account
     owner_user = account.users[0] if account and account.users else None
-    if challenge.delivery_status != "sent" and owner_user and owner_user.core_access_token:
+    if owner_user and owner_user.core_access_token:
         try:
             core_email_gateway.send_html_email(
                 access_token=owner_user.core_access_token,
                 to_email=email,
-                subject="Seu codigo de acesso FitCopilot",
+                subject="Seu codigo de acesso ao FitCopilot",
                 html_content=_build_student_otp_html(student.full_name, code),
             )
+            email_sent = True
             challenge.delivery_status = "sent"
-            delivery_channel = "email"
-        except Exception:
-            challenge.delivery_status = "failed"
+            delivery_channel = "whatsapp_email" if whatsapp_queued else "email"
+        except Exception as exc:
+            current_app.logger.warning("student_otp_email_failed student_id=%s error=%s", student.id, exc)
+            if not whatsapp_queued:
+                challenge.delivery_status = "failed"
+    if not email_sent and whatsapp_queued:
+        challenge.delivery_status = "queued"
+        delivery_channel = "whatsapp"
     elif challenge.delivery_status != "sent":
         challenge.delivery_status = "debug"
         delivery_channel = "debug"
