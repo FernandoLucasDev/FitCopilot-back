@@ -16,6 +16,7 @@ from app.messaging.models import SuggestedMessage
 from app.nutrition.plan_services import get_active_nutrition_plan_for_student, serialize_nutrition_plan
 from app.operations.services import emit_event, evaluate_retention_automation, recompute_and_persist_score
 from app.students.models import StudentDailySignal, StudentInteraction, StudentProfile
+from app.students.portal_models import StudentLoginChallenge
 from app.students.services import require_student
 from app.whatsapp.models import (
     InboundMessageRecord,
@@ -1075,6 +1076,10 @@ def record_delivery_event(*, dispatch: OutboundMessageDispatch, event_type: str,
             )
         )
     if event_type in {"delivered", "read", "failed"}:
+        if dispatch.message_category == "student_otp" and dispatch.related_entity_type == "student_login_challenge":
+            challenge = db.session.get(StudentLoginChallenge, dispatch.related_entity_id)
+            if challenge is not None:
+                challenge.delivery_status = "failed" if event_type == "failed" else "sent"
         emit_event(
             account_id=dispatch.account_id,
             student_id=dispatch.student_id,
