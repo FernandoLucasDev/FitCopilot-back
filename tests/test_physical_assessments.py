@@ -76,7 +76,7 @@ def test_physical_assessment_accepts_photo_upload(client, auth_headers, seeded_d
 
 def test_physical_assessment_imports_real_pdf_document(client, auth_headers, seeded_data):
     student_id = seeded_data["student"].id
-    pdf_path = Path(__file__).resolve().parents[2] / "Dados e Plano Alimentar - Fernando.pdf"
+    pdf_path = Path(__file__).resolve().parent / "fixtures" / "physical-assessment-fernando.pdf"
 
     response = client.post(
         f"/api/v1/students/{student_id}/physical-assessments",

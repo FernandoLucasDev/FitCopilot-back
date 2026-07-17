@@ -1,0 +1,85 @@
+name: Test and deploy FitCopilot backend
+
+on:
+  push:
+    branches:
+      - main
+      - stg
+      - develop
+  workflow_dispatch:
+
+concurrency:
+  group: fitcopilot-backend-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run backend smoke tests
+        run: |
+          python -m pytest \
+            tests/test_physical_assessments.py \
+            tests/test_api_integration.py::test_physical_assessment_can_be_created_from_uploaded_document
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.FITCOPILOT_VPS_HOST }}
+      SSH_USER: ${{ secrets.FITCOPILOT_VPS_USER }}
+      SSH_PORT: ${{ secrets.FITCOPILOT_VPS_PORT || '22' }}
+      SSH_KEY: ${{ secrets.FITCOPILOT_VPS_SSH_KEY }}
+      TARGET_DIR: ${{ github.ref_name == 'main' && '/root/fitcopilot' || github.ref_name == 'stg' && '/root/fitcopilot-stg' || '/root/fitcopilot-dev' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip when deploy secrets are not configured
+        id: deploy_secrets
+        run: |
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || [ -z "$SSH_KEY" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Deploy secrets are not configured; tests passed, deploy skipped."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Configure SSH
+        if: steps.deploy_secrets.outputs.configured == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/fitcopilot_deploy_key
+          chmod 600 ~/.ssh/fitcopilot_deploy_key
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Validate target environment
+        if: steps.deploy_secrets.outputs.configured == 'true'
+        run: |
+          ssh -i ~/.ssh/fitcopilot_deploy_key -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "test -f '$TARGET_DIR/docker-compose.yml' && test -d '$TARGET_DIR/backend/.secrets'"
+      - name: Sync backend source
+        if: steps.deploy_secrets.outputs.configured == 'true'
+        run: |
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.pytest_cache/' \
+            --exclude '.venv/' \
+            --exclude '__pycache__/' \
+            --exclude 'storage/' \
+            --exclude '.env' \
+            --exclude '.secrets/' \
+            --exclude 'worker-dev.log' \
+            --exclude 'worker-dev.err.log' \
+            -e "ssh -i ~/.ssh/fitcopilot_deploy_key -p $SSH_PORT" \
+            ./ "$SSH_USER@$SSH_HOST:$TARGET_DIR/backend/"
+      - name: Rebuild backend services
+        if: steps.deploy_secrets.outputs.configured == 'true'
+        run: |
+          ssh -i ~/.ssh/fitcopilot_deploy_key -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "cd '$TARGET_DIR' && docker compose up -d --build fc_backend_api fc_backend_worker fc_backend_beat && docker compose ps fc_backend_api"
