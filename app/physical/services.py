@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
 from io import BytesIO
 import re
+import unicodedata
 import zipfile
 from xml.etree import ElementTree
 
@@ -506,43 +507,56 @@ def _extract_xlsx_text(content: bytes) -> str:
     return " ".join(values)
 
 
+def _normalize_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    return "".join(char for char in normalized if not unicodedata.combining(char)).lower()
+
+
 def _extract_physical_values_from_text(text: str) -> dict:
     aliases = {
         "weight_kg": ["peso", "weight"],
-        "height_cm": ["altura", "height"],
-        "body_fat_percentage": ["gordura corporal", "percentual de gordura", "bf", "body fat"],
-        "lean_mass_kg": ["massa magra", "lean mass"],
-        "fat_mass_kg": ["massa gorda", "fat mass"],
+        "height_cm": ["altura", "estatura", "height"],
+        "bmi": ["imc", "bmi"],
+        "body_fat_percentage": ["gordura corporal", "percentual de gordura", "% gordura corporal", "bf", "body fat"],
+        "lean_mass_kg": ["massa magra", "peso magro", "lean mass"],
+        "fat_mass_kg": ["massa gorda", "peso gorduroso", "fat mass"],
         "basal_metabolic_rate": ["metabolismo basal", "bmr", "tmb"],
         "visceral_fat_level": ["gordura visceral", "visceral"],
         "body_age": ["idade corporal"],
-        "hydration_percentage": ["hidratação", "hidratacao"],
-        "chest_cm": ["peito", "torax", "tórax"],
+        "hydration_percentage": ["hidratacao"],
+        "chest_cm": ["peito", "torax"],
         "waist_cm": ["cintura"],
-        "abdomen_cm": ["abdomen", "abdômen", "abdominal"],
+        "abdomen_cm": ["abdomen", "abdominal"],
         "hip_cm": ["quadril"],
         "shoulders_cm": ["ombros", "ombro"],
-        "neck_cm": ["pescoço", "pescoco"],
-        "left_arm_relaxed_cm": ["braço esquerdo relaxado", "braco esquerdo relaxado"],
-        "right_arm_relaxed_cm": ["braço direito relaxado", "braco direito relaxado"],
-        "left_arm_contracted_cm": ["braço esquerdo contraído", "braco esquerdo contraido"],
-        "right_arm_contracted_cm": ["braço direito contraído", "braco direito contraido"],
+        "neck_cm": ["pescoco"],
+        "left_arm_relaxed_cm": ["braco esquerdo relaxado", "braco e", "braco esquerdo"],
+        "right_arm_relaxed_cm": ["braco direito relaxado", "braco d", "braco direito"],
+        "left_arm_contracted_cm": ["braco esquerdo contraido"],
+        "right_arm_contracted_cm": ["braco direito contraido"],
         "left_thigh_cm": ["coxa esquerda"],
         "right_thigh_cm": ["coxa direita"],
         "left_calf_cm": ["panturrilha esquerda"],
         "right_calf_cm": ["panturrilha direita"],
-        "resting_heart_rate": ["frequência cardíaca", "frequencia cardiaca", "fc repouso"],
+        "resting_heart_rate": ["frequencia cardiaca", "fc repouso"],
     }
     values: dict[str, str] = {}
-    normalized = text.replace("\r", "\n")
+    normalized = _normalize_text(text).replace("\r", "\n")
     for field, labels in aliases.items():
         for label in labels:
-            pattern = rf"{re.escape(label)}\s*[:\-]?\s*(\d+(?:[,.]\d+)?)\s*(?:kg|cm|%|bpm|kcal)?"
+            pattern = rf"\b{re.escape(label)}\b\s*(?:\([^)\n]*\))?\s*[:\-]?\s*(\d+(?:[,.]\d+)?)\s*(?:kg|cm|m|%|bpm|kcal)?"
             match = re.search(pattern, normalized, flags=re.IGNORECASE)
             if match:
                 values[field] = match.group(1).replace(",", ".")
                 break
-    pressure = re.search(r"(?:press[aã]o|pa|blood pressure)\s*[:\-]?\s*(\d{2,3}\s*/\s*\d{2,3})", normalized, flags=re.IGNORECASE)
+    if values.get("height_cm"):
+        try:
+            height = Decimal(values["height_cm"])
+            if height <= 3:
+                values["height_cm"] = str(height * 100)
+        except InvalidOperation:
+            pass
+    pressure = re.search(r"(?:pressao|pa|blood pressure)\s*[:\-]?\s*(\d{2,3}\s*/\s*\d{2,3})", normalized, flags=re.IGNORECASE)
     if pressure:
         values["blood_pressure"] = pressure.group(1).replace(" ", "")
     return values

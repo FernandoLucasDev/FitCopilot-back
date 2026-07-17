@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 
 from app.physical.models import PhysicalAssessment, PhysicalAssessmentComparison, PhysicalAssessmentPhoto
 
@@ -71,3 +72,25 @@ def test_physical_assessment_accepts_photo_upload(client, auth_headers, seeded_d
     payload = response.get_json()["data"]["assessment"]
     assert payload["photos"][0]["type"] == "front"
     assert PhysicalAssessmentPhoto.query.count() == 1
+
+
+def test_physical_assessment_imports_real_pdf_document(client, auth_headers, seeded_data):
+    student_id = seeded_data["student"].id
+    pdf_path = Path(__file__).resolve().parents[2] / "Dados e Plano Alimentar - Fernando.pdf"
+
+    response = client.post(
+        f"/api/v1/students/{student_id}/physical-assessments",
+        headers=auth_headers,
+        data={
+            "extract_only": "true",
+            "assessment_file": (BytesIO(pdf_path.read_bytes()), pdf_path.name),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()["data"]["assessment"]
+    assert payload["weightKg"] == 65.6
+    assert payload["heightCm"] == 184.0
+    assert payload["bodyFatPercentage"] == 14.3
+    assert payload["measurements"]["waistCm"] == 74.4
