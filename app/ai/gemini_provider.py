@@ -8,7 +8,7 @@ from google import genai
 from google.genai import types as genai_types
 from pypdf import PdfReader
 
-from app.ai.base import AIProvider, DailySummaryResult, FileSummaryResult, MealAnalysisResult, MediaSafetyResult
+from app.ai.base import AIProvider, DailySummaryResult, FileSummaryResult, MealAnalysisResult, MediaSafetyResult, SentimentResult
 from app.ai.fake_provider import FakeAIProvider
 
 
@@ -275,3 +275,71 @@ Contexto JSON:
         if not payload:
             return self._fallback.generate_workout_insight(context=context)
         return payload.get("insight_text") or self._fallback.generate_workout_insight(context=context)
+
+    def weekly_recap(self, *, context: dict) -> str:
+        payload = self._generate_json(
+            prompt=f"""
+Voce e o FitCopilot. Escreva um recap narrativo curto (3-5 frases, em portugues) da ultima
+semana do aluno para o profissional ler rapido: aderencia, treinos, contexto nutricional/wearable
+quando houver, e a proxima acao recomendada. Tom de acompanhamento — nunca diagnostico ou prescricao.
+Retorne JSON com a chave recap_text.
+
+Contexto JSON:
+{json.dumps(context, ensure_ascii=False, default=str)}
+""",
+            model=self.smart_model,
+        )
+        if not payload:
+            return self._fallback.weekly_recap(context=context)
+        return payload.get("recap_text") or self._fallback.weekly_recap(context=context)
+
+    def student_questions(self, *, context: dict) -> list[str]:
+        payload = self._generate_json(
+            prompt=f"""
+Voce e o FitCopilot. Gere de 3 a 5 perguntas curtas, empaticas e uteis que o profissional
+pode fazer ao aluno no proximo contato, com base nos dados abaixo (aderencia, sinais, evolucao).
+Nao prescreva nada — as perguntas servem pra entender o aluno. Em portugues.
+Retorne JSON com a chave questions (lista de strings).
+
+Contexto JSON:
+{json.dumps(context, ensure_ascii=False, default=str)}
+""",
+            model=self.fast_model,
+        )
+        if not payload:
+            return self._fallback.student_questions(context=context)
+        questions = payload.get("questions")
+        if isinstance(questions, list) and questions:
+            return [str(item) for item in questions if str(item).strip()][:5]
+        return self._fallback.student_questions(context=context)
+
+    def analyze_sentiment(self, *, messages: list[str], context: dict) -> SentimentResult:
+        if not messages:
+            return SentimentResult(label="sem_dados", note="Sem respostas do aluno para ler ainda.", confidence=None)
+        payload = self._generate_json(
+            prompt=f"""
+Voce e uma camada de leitura assistida do FitCopilot. Leia SOMENTE o tom das mensagens que o
+aluno enviou (abaixo) e classifique o sentimento geral recente. Isto e leitura de acompanhamento,
+NUNCA um diagnostico clinico ou psicologico. Nao repita o conteudo das mensagens.
+Retorne JSON com:
+- label: uma de positivo, neutro, frustrado, desmotivado
+- note: uma frase curta e util pro profissional (sem citar o texto literal do aluno)
+- confidence: numero entre 0 e 1
+
+Mensagens do aluno (mais recentes primeiro):
+{json.dumps(messages[:15], ensure_ascii=False)}
+""",
+            model=self.fast_model,
+        )
+        if not payload:
+            return self._fallback.analyze_sentiment(messages=messages, context=context)
+        label = str(payload.get("label") or "neutro")
+        if label not in {"positivo", "neutro", "frustrado", "desmotivado"}:
+            label = "neutro"
+        note = str(payload.get("note") or "Leitura de tom concluida.")
+        confidence = payload.get("confidence")
+        try:
+            confidence = float(confidence) if confidence is not None else None
+        except Exception:
+            confidence = None
+        return SentimentResult(label=label, note=note, confidence=confidence)

@@ -42,6 +42,14 @@ class MediaSafetyResult:
     confidence: float | None = None
 
 
+@dataclass
+class SentimentResult:
+    # Leitura assistida do tom das respostas do aluno — nunca diagnostico.
+    label: str  # "positivo" | "neutro" | "frustrado" | "desmotivado" | "sem_dados"
+    note: str
+    confidence: float | None = None
+
+
 class AIProvider:
     def summarize_file(self, *, filename: str, content: bytes, context: dict) -> FileSummaryResult:
         raise NotImplementedError
@@ -62,4 +70,13 @@ class AIProvider:
         raise NotImplementedError
 
     def generate_workout_insight(self, *, context: dict) -> str:
+        raise NotImplementedError
+
+    def weekly_recap(self, *, context: dict) -> str:
+        raise NotImplementedError
+
+    def student_questions(self, *, context: dict) -> list[str]:
+        raise NotImplementedError
+
+    def analyze_sentiment(self, *, messages: list[str], context: dict) -> SentimentResult:
         raise NotImplementedError

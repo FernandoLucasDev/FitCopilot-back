@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.files.models import StudentFile
+from app.insights.coach_signals import analyze_load_progression, build_coach_signals
 from app.insights.models import AIInsight
 from app.messaging.models import SuggestedMessage
 from app.extensions import db
@@ -177,6 +178,8 @@ def get_student_panel(student) -> dict:
         "workoutPlans": workout_plans,
         "workoutHistory": sessions,
         "workoutConsistency": workout_consistency,
+        "loadProgression": analyze_load_progression(student),
+        "coachSignals": build_coach_signals(student),
         "physicalAssessments": [serialize_assessment(item) for item in physical_assessments],
         "physicalProgress": physical_progress,
         "files": [

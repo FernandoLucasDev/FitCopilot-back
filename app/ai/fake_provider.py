@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.ai.base import AIProvider, DailySummaryResult, FileSummaryResult, MealAnalysisResult, MediaSafetyResult
+from app.ai.base import AIProvider, DailySummaryResult, FileSummaryResult, MealAnalysisResult, MediaSafetyResult, SentimentResult
 
 
 class FakeAIProvider(AIProvider):
@@ -129,3 +129,40 @@ class FakeAIProvider(AIProvider):
             f"{workout_label}: hoje vale focar em boa execução, ritmo constante e sem pular exercícios principais. "
             "Quando concluir, me manda aqui como você se sentiu."
         )
+
+    def weekly_recap(self, *, context: dict) -> str:
+        student_name = str(context.get("student_name") or "O aluno").split()[0]
+        completed = context.get("workouts_completed", 0)
+        skipped = context.get("workouts_skipped", 0)
+        score = context.get("score")
+        parts = [
+            f"Na última semana, {student_name} concluiu {completed} treino(s)"
+            + (f" e faltou em {skipped}." if skipped else "."),
+        ]
+        if score is not None:
+            parts.append(f"O score operacional está em {score}.")
+        parts.append(
+            "No geral, o acompanhamento segue estável — vale reforçar o que está funcionando e ajustar o que ficou para trás."
+        )
+        return " ".join(parts)
+
+    def student_questions(self, *, context: dict) -> list[str]:
+        return [
+            "Como você se sentiu nos treinos desta semana?",
+            "Teve algum dia em que ficou mais difícil manter a rotina? O que atrapalhou?",
+            "Tem alguma dor, desconforto ou sinal de cansaço que eu deva saber?",
+            "Como está a alimentação e o sono ultimamente?",
+            "Tem algo que você gostaria de ajustar no plano pra próxima semana?",
+        ]
+
+    def analyze_sentiment(self, *, messages: list[str], context: dict) -> SentimentResult:
+        if not messages:
+            return SentimentResult(label="sem_dados", note="Sem respostas do aluno para ler ainda.", confidence=None)
+        blob = " ".join(messages).lower()
+        negative = any(word in blob for word in ["cansad", "difícil", "dificil", "desanim", "dor", "não consig", "nao consig", "ruim", "parar"])
+        positive = any(word in blob for word in ["ótimo", "otimo", "consegui", "animad", "feliz", "melhor", "obrigad", "top"])
+        if negative and not positive:
+            return SentimentResult(label="desmotivado", note="As respostas sugerem cansaço ou dificuldade — vale um contato mais próximo.", confidence=0.5)
+        if positive and not negative:
+            return SentimentResult(label="positivo", note="As respostas sugerem engajamento e bom ânimo.", confidence=0.5)
+        return SentimentResult(label="neutro", note="Tom neutro nas respostas recentes.", confidence=0.4)
