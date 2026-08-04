@@ -362,6 +362,41 @@ def test_core_delivery_status_updates_dispatch_idempotently(client, auth_headers
         assert WhatsAppDeliveryStatusEvent.query.filter_by(outbound_dispatch_id=dispatch.id).count() == 1
 
 
+def test_core_failed_delivery_status_persists_failure_reason(client, auth_headers, seeded_data, monkeypatch):
+    from app.jobs import tasks
+
+    monkeypatch.setattr(tasks.send_whatsapp_message_job, "delay", lambda *args, **kwargs: None)
+    student_id = str(seeded_data["student"].id)
+    queued = _ok(
+        client.post(
+            f"/api/v1/students/{student_id}/whatsapp/send-message",
+            headers=auth_headers,
+            json={"message_text": "Status de falha pelo Core"},
+        ),
+        202,
+    )
+    dispatch_id = queued["dispatch"]["id"]
+    with client.application.app_context():
+        dispatch = db.session.get(OutboundMessageDispatch, dispatch_id)
+        dispatch.core_message_public_id = "core-public-failed-1"
+        db.session.commit()
+
+    payload = {
+        "coreMessagePublicId": "core-public-failed-1",
+        "status": "failed",
+        "providerErrorCode": "133010",
+        "providerErrorMessage": "(#133010) Account not registered",
+        "providerEventId": "wamid.failed-1",
+    }
+    headers = {"X-Bot-Secret": client.application.config["BOT_INTERNAL_SECRET"]}
+    response = _ok(client.post("/api/v1/internal/bot/whatsapp/status", headers=headers, json=payload))
+    assert response["status"] == "failed"
+    with client.application.app_context():
+        dispatch = db.session.get(OutboundMessageDispatch, dispatch_id)
+        assert dispatch.local_status == "failed"
+        assert dispatch.payload_json["_failure_reason"] == "133010: (#133010) Account not registered"
+
+
 def test_core_inbound_is_persisted_once_and_refreshes_student(client, seeded_data):
     student = seeded_data["student"]
     headers = {"X-Bot-Secret": client.application.config["BOT_INTERNAL_SECRET"]}

@@ -1182,6 +1182,17 @@ def record_delivery_event(*, dispatch: OutboundMessageDispatch, event_type: str,
             )
         )
     if event_type in {"delivered", "read", "failed"}:
+        if event_type == "failed":
+            failure_reason = (
+                payload.get("providerErrorMessage")
+                or payload.get("provider_error_message")
+                or payload.get("error")
+                or "O provedor recusou o envio pelo WhatsApp."
+            )
+            provider_error_code = payload.get("providerErrorCode") or payload.get("provider_error_code")
+            dispatch_payload = dict(dispatch.payload_json or {})
+            dispatch_payload["_failure_reason"] = f"{provider_error_code}: {failure_reason}" if provider_error_code else str(failure_reason)
+            dispatch.payload_json = dispatch_payload
         if dispatch.message_category == "student_otp" and dispatch.related_entity_type == "student_login_challenge":
             challenge = db.session.get(StudentLoginChallenge, dispatch.related_entity_id)
             if challenge is not None:
