@@ -965,6 +965,30 @@ def perform_dispatch(dispatch_id: str) -> OutboundMessageDispatch:
     dispatch.core_message_public_id = str(response.get("public_id") or response.get("id") or "")
     dispatch.core_channel_account_id = str(response.get("channel_account_id") or response.get("channelAccountId") or "") or None
     dispatch.local_status = str(response.get("status") or "accepted").lower()
+    if dispatch.local_status == "failed":
+        failure_reason = (
+            response.get("provider_error_message")
+            or response.get("providerErrorMessage")
+            or response.get("error")
+            or "O provedor recusou o envio pelo WhatsApp."
+        )
+        provider_error_code = response.get("provider_error_code") or response.get("providerErrorCode")
+        payload = dict(dispatch.payload_json or {})
+        payload["_failure_reason"] = f"{provider_error_code}: {failure_reason}" if provider_error_code else str(failure_reason)
+        dispatch.payload_json = payload
+        emit_event(
+            account_id=student.account_id,
+            student_id=student.id,
+            event_type="message_failed",
+            source="whatsapp",
+            title=f"WhatsApp falhou: {dispatch.message_category}",
+            body=payload["_failure_reason"],
+            event_key=f"whatsapp_dispatch_failed:{dispatch.id}",
+            payload={"dispatch_id": str(dispatch.id), "category": dispatch.message_category},
+        )
+        db.session.commit()
+        return dispatch
+
     db.session.add(
         StudentInteraction(
             account_id=student.account_id,

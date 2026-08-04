@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flask import Blueprint
+from flask import Blueprint, current_app
 
 from app.common.api import success_response
 from app.common.request import parse_json
@@ -29,6 +29,19 @@ from app.whatsapp.services import (
 whatsapp_bp = Blueprint("whatsapp", __name__)
 
 
+def _dispatch_response(dispatch):
+    payload = dispatch.payload_json or {}
+    return {
+        "id": str(dispatch.id),
+        "status": dispatch.local_status,
+        "failureReason": payload.get("_failure_reason"),
+    }
+
+
+def _manual_send_sync_enabled() -> bool:
+    return bool(current_app.config.get("WHATSAPP_MANUAL_SEND_SYNC", False))
+
+
 @whatsapp_bp.get("/whatsapp/status")
 @require_auth({"owner", "professional", "admin"})
 def whatsapp_status():
@@ -49,8 +62,8 @@ def student_whatsapp_status_endpoint(student_id):
 def onboard_student_whatsapp(student_id):
     auth = current_auth()
     student = require_student(auth.account_id, student_id)
-    dispatch = send_onboarding_message(student=student, actor_user_id=auth.user.id)
-    return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
+    dispatch = send_onboarding_message(student=student, actor_user_id=auth.user.id, enqueue=not _manual_send_sync_enabled())
+    return success_response({"dispatch": _dispatch_response(dispatch)}, 202)
 
 
 @whatsapp_bp.post("/students/<uuid:student_id>/whatsapp/send-checkin")
@@ -58,8 +71,8 @@ def onboard_student_whatsapp(student_id):
 def send_student_checkin(student_id):
     auth = current_auth()
     student = require_student(auth.account_id, student_id)
-    dispatch = send_daily_checkin(student=student, actor_user_id=auth.user.id)
-    return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
+    dispatch = send_daily_checkin(student=student, actor_user_id=auth.user.id, enqueue=not _manual_send_sync_enabled())
+    return success_response({"dispatch": _dispatch_response(dispatch)}, 202)
 
 
 @whatsapp_bp.post("/students/<uuid:student_id>/whatsapp/send-workout")
@@ -67,8 +80,8 @@ def send_student_checkin(student_id):
 def send_student_workout(student_id):
     auth = current_auth()
     student = require_student(auth.account_id, student_id)
-    dispatch = send_workout_of_day(student=student, actor_user_id=auth.user.id)
-    return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
+    dispatch = send_workout_of_day(student=student, actor_user_id=auth.user.id, enqueue=not _manual_send_sync_enabled())
+    return success_response({"dispatch": _dispatch_response(dispatch)}, 202)
 
 
 @whatsapp_bp.post("/students/<uuid:student_id>/whatsapp/send-nutrition-plan")
@@ -76,8 +89,8 @@ def send_student_workout(student_id):
 def send_student_nutrition_plan(student_id):
     auth = current_auth()
     student = require_student(auth.account_id, student_id)
-    dispatch = send_nutrition_plan_of_day(student=student, actor_user_id=auth.user.id)
-    return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
+    dispatch = send_nutrition_plan_of_day(student=student, actor_user_id=auth.user.id, enqueue=not _manual_send_sync_enabled())
+    return success_response({"dispatch": _dispatch_response(dispatch)}, 202)
 
 
 @whatsapp_bp.post("/students/<uuid:student_id>/whatsapp/send-daily-report")
@@ -85,8 +98,8 @@ def send_student_nutrition_plan(student_id):
 def send_student_daily_report(student_id):
     auth = current_auth()
     student = require_student(auth.account_id, student_id)
-    dispatch = send_end_of_day_report(student=student, actor_user_id=auth.user.id)
-    return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
+    dispatch = send_end_of_day_report(student=student, actor_user_id=auth.user.id, enqueue=not _manual_send_sync_enabled())
+    return success_response({"dispatch": _dispatch_response(dispatch)}, 202)
 
 
 @whatsapp_bp.post("/students/<uuid:student_id>/whatsapp/send-message")
@@ -99,8 +112,9 @@ def send_student_message(student_id):
         student=student,
         actor_user_id=auth.user.id,
         message_text=payload.message_text,
+        enqueue=not _manual_send_sync_enabled(),
     )
-    return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
+    return success_response({"dispatch": _dispatch_response(dispatch)}, 202)
 
 
 @whatsapp_bp.get("/students/<uuid:student_id>/whatsapp/history")
@@ -125,8 +139,8 @@ def send_student_whatsapp_suggestion(student_id, suggestion_id):
     auth = current_auth()
     student = require_student(auth.account_id, student_id)
     suggestion = require_message(auth.account_id, suggestion_id)
-    dispatch = send_suggested_message(student=student, actor_user_id=auth.user.id, suggestion=suggestion)
-    return success_response({"dispatch": {"id": str(dispatch.id), "status": dispatch.local_status}}, 202)
+    dispatch = send_suggested_message(student=student, actor_user_id=auth.user.id, suggestion=suggestion, enqueue=not _manual_send_sync_enabled())
+    return success_response({"dispatch": _dispatch_response(dispatch)}, 202)
 
 
 @whatsapp_bp.post("/students/<uuid:student_id>/whatsapp/suggestions/<uuid:suggestion_id>/edit")

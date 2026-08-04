@@ -73,6 +73,7 @@ class Settings:
     LOCAL_AI_MODEL_SMART: str = _env_or_file("LOCAL_AI_MODEL_SMART", "fitcopilot-smart") or "fitcopilot-smart"
     WHATSAPP_REQUESTED_BY_SERVICE: str = _env_or_file("WHATSAPP_REQUESTED_BY_SERVICE", "fitcopilot-backend") or "fitcopilot-backend"
     WHATSAPP_PROVIDER_MODE: str = _env_or_file("WHATSAPP_PROVIDER_MODE", "core") or "core"
+    WHATSAPP_MANUAL_SEND_SYNC: bool = (_env_or_file("WHATSAPP_MANUAL_SEND_SYNC", "false") or "false").lower() in {"1", "true", "yes", "on"}
     WHATSAPP_DEFAULT_COUNTRY_CODE: str = _env_or_file("WHATSAPP_DEFAULT_COUNTRY_CODE", "55") or "55"
     WHATSAPP_CHECKIN_HOUR: int = int(_env_or_file("WHATSAPP_CHECKIN_HOUR", "8") or "8")
     WHATSAPP_DAILY_REPORT_HOUR: int = int(_env_or_file("WHATSAPP_DAILY_REPORT_HOUR", "20") or "20")

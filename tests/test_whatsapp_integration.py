@@ -213,6 +213,42 @@ def test_whatsapp_status_and_history_endpoints(client, auth_headers, seeded_data
         assert "Se quiser alinhar algum detalhe" in body
 
 
+def test_manual_whatsapp_send_sync_returns_failure_reason(client, auth_headers, seeded_data, monkeypatch):
+    from app.integrations import core_messaging_client as client_module
+
+    client.application.config["WHATSAPP_MANUAL_SEND_SYNC"] = True
+    monkeypatch.setattr(
+        client_module.core_messaging_client,
+        "send_text_message",
+        lambda **kwargs: {
+            "public_id": "core-msg-failed",
+            "channel_account_id": "wa-acc-1",
+            "status": "failed",
+            "provider_error_code": "133010",
+            "provider_error_message": "(#133010) Account not registered",
+        },
+    )
+
+    student_id = str(seeded_data["student"].id)
+    response = _ok(
+        client.post(
+            f"/api/v1/students/{student_id}/whatsapp/send-message",
+            headers=auth_headers,
+            json={"message_text": "Mensagem com falha"},
+        ),
+        202,
+    )
+
+    assert response["dispatch"]["status"] == "failed"
+    assert "133010" in response["dispatch"]["failureReason"]
+
+    with client.application.app_context():
+        dispatch = db.session.get(OutboundMessageDispatch, response["dispatch"]["id"])
+        assert dispatch is not None
+        assert dispatch.local_status == "failed"
+        assert "Account not registered" in dispatch.payload_json["_failure_reason"]
+
+
 def test_core_delivery_status_updates_dispatch_idempotently(client, auth_headers, seeded_data, monkeypatch):
     from app.jobs import tasks
 
