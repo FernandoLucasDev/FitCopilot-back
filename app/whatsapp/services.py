@@ -114,13 +114,15 @@ def _upsert_session(*, student: StudentProfile, flow: str, step: str, context: d
 
 
 def _dispatch_status_payload(item: OutboundMessageDispatch) -> dict:
+    payload = item.payload_json or {}
     return {
         "id": str(item.id),
         "category": item.message_category,
         "status": item.local_status,
         "coreMessagePublicId": item.core_message_public_id,
         "externalReference": item.external_reference,
-        "payload": item.payload_json,
+        "failureReason": payload.get("_failure_reason"),
+        "payload": payload,
         "createdAt": item.created_at.isoformat(),
         "updatedAt": item.updated_at.isoformat(),
     }

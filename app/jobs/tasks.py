@@ -49,6 +49,9 @@ def send_whatsapp_message_job(dispatch_id: str):
     except Exception as exc:  # pragma: no cover
         if dispatch:
             dispatch.local_status = "failed"
+            payload = dict(dispatch.payload_json or {})
+            payload["_failure_reason"] = str(exc)
+            dispatch.payload_json = payload
         if ledger:
             finish_background_job(ledger, status="failed", error_message=str(exc))
         db.session.commit()
