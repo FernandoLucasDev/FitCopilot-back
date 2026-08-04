@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+import requests
+
 from app.extensions import db
 from app.jobs.tasks import process_inbound_whatsapp_message_job
 from app.students.models import StudentDailySignal
@@ -247,6 +249,79 @@ def test_manual_whatsapp_send_sync_returns_failure_reason(client, auth_headers, 
         assert dispatch is not None
         assert dispatch.local_status == "failed"
         assert "Account not registered" in dispatch.payload_json["_failure_reason"]
+
+
+def test_whatsapp_send_refreshes_expired_core_token_before_retry(client, auth_headers, seeded_data, monkeypatch):
+    from app.auth import core_auth_service as auth_module
+    from app.integrations import core_messaging_client as client_module
+
+    client.application.config["WHATSAPP_MANUAL_SEND_SYNC"] = True
+    with client.application.app_context():
+        owner = seeded_data["owner"]
+        owner.core_access_token = "expired-core-token"
+        owner.core_refresh_token = "refresh-core-token"
+        db.session.commit()
+
+    calls = []
+
+    def fake_send_text_message(**kwargs):
+        calls.append(kwargs["token"])
+        if len(calls) == 1:
+            response = requests.Response()
+            response.status_code = 401
+            raise requests.HTTPError("401 Client Error", response=response)
+        return {"public_id": "core-msg-refreshed", "channel_account_id": "wa-acc-1", "status": "accepted"}
+
+    monkeypatch.setattr(client_module.core_messaging_client, "send_text_message", fake_send_text_message)
+    monkeypatch.setattr(
+        auth_module.core_auth_service,
+        "refresh",
+        lambda **kwargs: {"access": "fresh-core-token", "refresh": "fresh-refresh-token"},
+    )
+
+    student_id = str(seeded_data["student"].id)
+    response = _ok(
+        client.post(
+            f"/api/v1/students/{student_id}/whatsapp/send-message",
+            headers=auth_headers,
+            json={"message_text": "Mensagem com token renovado"},
+        ),
+        202,
+    )
+
+    assert response["dispatch"]["status"] == "accepted"
+    assert calls == ["expired-core-token", "fresh-core-token"]
+    with client.application.app_context():
+        owner = db.session.get(type(seeded_data["owner"]), seeded_data["owner"].id)
+        assert owner.core_access_token == "fresh-core-token"
+        assert owner.core_refresh_token == "fresh-refresh-token"
+
+
+def test_manual_whatsapp_send_sync_marks_provider_exception_as_failed(client, auth_headers, seeded_data, monkeypatch):
+    from app.integrations import core_messaging_client as client_module
+
+    client.application.config["WHATSAPP_MANUAL_SEND_SYNC"] = True
+
+    def fake_send_text_message(**kwargs):
+        response = requests.Response()
+        response.status_code = 503
+        response._content = b'{"error":"provider unavailable"}'
+        raise requests.HTTPError("503 Server Error: provider unavailable", response=response)
+
+    monkeypatch.setattr(client_module.core_messaging_client, "send_text_message", fake_send_text_message)
+
+    student_id = str(seeded_data["student"].id)
+    response = _ok(
+        client.post(
+            f"/api/v1/students/{student_id}/whatsapp/send-message",
+            headers=auth_headers,
+            json={"message_text": "Mensagem com provedor indisponivel"},
+        ),
+        202,
+    )
+
+    assert response["dispatch"]["status"] == "failed"
+    assert "503 Server Error" in response["dispatch"]["failureReason"]
 
 
 def test_core_delivery_status_updates_dispatch_idempotently(client, auth_headers, seeded_data, monkeypatch):

@@ -8,6 +8,7 @@ from uuid import uuid4
 import requests
 from flask import current_app
 
+from app.auth.core_auth_service import core_auth_service
 from app.common.api import ApiError
 from app.extensions import db
 from app.integrations.core_messaging_client import core_messaging_client
@@ -77,6 +78,32 @@ def _owner_context(student: StudentProfile) -> tuple[str, str | None]:
     if not token:
         raise ApiError("Sessão CORE indisponível para envio de WhatsApp.", HTTPStatus.CONFLICT)
     return token, org_id
+
+
+def _refresh_owner_core_session(student: StudentProfile) -> tuple[str, str | None]:
+    account_users = list(student.account.users) if student.account and student.account.users else []
+    role_priority = {"owner": 0, "admin": 1, "professional": 2}
+    eligible_users = [user for user in account_users if user.core_refresh_token]
+    owner = next(
+        iter(
+            sorted(
+                eligible_users,
+                key=lambda user: role_priority.get(str(user.role or "").lower(), 99),
+            )
+        ),
+        None,
+    )
+    if owner is None:
+        raise ApiError("Sessao CORE expirada. Entre novamente para reativar os envios.", HTTPStatus.UNAUTHORIZED)
+
+    refreshed = core_auth_service.refresh(refresh_token=owner.core_refresh_token)
+    owner.core_access_token = refreshed.get("access") or refreshed.get("access_token") or owner.core_access_token
+    owner.core_refresh_token = refreshed.get("refresh") or refreshed.get("refresh_token") or owner.core_refresh_token
+    db.session.commit()
+    if not owner.core_access_token:
+        raise ApiError("CORE nao retornou uma sessao valida para WhatsApp.", HTTPStatus.UNAUTHORIZED)
+    org_id = student.account.external_org_id if student.account else None
+    return owner.core_access_token, org_id
 
 
 def _idempotency_key(prefix: str, student: StudentProfile, suffix: str) -> str:
@@ -401,7 +428,11 @@ def queue_whatsapp_dispatch(
 
         send_whatsapp_message_job.delay(str(dispatch.id))
     else:
-        perform_dispatch(str(dispatch.id))
+        try:
+            perform_dispatch(str(dispatch.id))
+        except Exception as exc:
+            student = require_student(dispatch.account_id, dispatch.student_id)
+            _mark_dispatch_failed(dispatch, student, str(exc))
     return dispatch
 
 
@@ -925,6 +956,25 @@ def _send_dispatch_via_local_bot(*, dispatch: OutboundMessageDispatch, student: 
     }
 
 
+def _mark_dispatch_failed(dispatch: OutboundMessageDispatch, student: StudentProfile, reason: str) -> OutboundMessageDispatch:
+    payload = dict(dispatch.payload_json or {})
+    payload["_failure_reason"] = str(reason)
+    dispatch.payload_json = payload
+    dispatch.local_status = "failed"
+    emit_event(
+        account_id=student.account_id,
+        student_id=student.id,
+        event_type="message_failed",
+        source="whatsapp",
+        title=f"WhatsApp falhou: {dispatch.message_category}",
+        body=payload["_failure_reason"],
+        event_key=f"whatsapp_dispatch_failed:{dispatch.id}",
+        payload={"dispatch_id": str(dispatch.id), "category": dispatch.message_category},
+    )
+    db.session.commit()
+    return dispatch
+
+
 def perform_dispatch(dispatch_id: str) -> OutboundMessageDispatch:
     dispatch = OutboundMessageDispatch.query.filter_by(id=dispatch_id).first()
     if dispatch is None:
@@ -932,8 +982,7 @@ def perform_dispatch(dispatch_id: str) -> OutboundMessageDispatch:
     student = require_student(dispatch.account_id, dispatch.student_id)
     phone = normalize_phone(student.phone)
     if not phone:
-        dispatch.local_status = "failed"
-        db.session.commit()
+        _mark_dispatch_failed(dispatch, student, "Aluno sem telefone valido.")
         raise ApiError("Aluno sem telefone válido.", HTTPStatus.CONFLICT)
 
     payload = dispatch.payload_json or {}
@@ -1025,50 +1074,81 @@ def _send_dispatch_via_core(
     message_type: str,
 ) -> dict:
     token, org_id = _owner_context(student)
+    kwargs = {
+        "token": token,
+        "to_phone": phone,
+        "idempotency_key": dispatch.idempotency_key,
+        "external_reference": dispatch.external_reference,
+        "requested_by_service": dispatch.requested_by_service,
+        "org_id": org_id,
+    }
+    try:
+        return _send_dispatch_via_core_with_token(payload=payload, message_type=message_type, **kwargs)
+    except requests.HTTPError as exc:
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) != 401:
+            raise
+        token, org_id = _refresh_owner_core_session(student)
+        kwargs["token"] = token
+        kwargs["org_id"] = org_id
+        return _send_dispatch_via_core_with_token(payload=payload, message_type=message_type, **kwargs)
+
+
+def _send_dispatch_via_core_with_token(
+    *,
+    token: str,
+    to_phone: str,
+    payload: dict,
+    message_type: str,
+    idempotency_key: str,
+    external_reference: str,
+    requested_by_service: str,
+    org_id: str | None,
+) -> dict:
     if message_type == "interactive":
         return core_messaging_client.send_interactive_message(
                 token=token,
-                to_phone=phone,
+                to_phone=to_phone,
                 body=payload.get("interactive", {}).get("body", ""),
                 buttons=payload.get("interactive", {}).get("buttons", []),
-                idempotency_key=dispatch.idempotency_key,
-                external_reference=dispatch.external_reference,
-                requested_by_service=dispatch.requested_by_service,
+                idempotency_key=idempotency_key,
+                external_reference=external_reference,
+                requested_by_service=requested_by_service,
                 org_id=org_id,
         )
     if message_type == "media":
         media = payload.get("media", {})
         return core_messaging_client.send_media_message(
                 token=token,
-                to_phone=phone,
+                to_phone=to_phone,
                 media_url=media.get("link", ""),
                 media_type=media.get("type", "document"),
                 caption=media.get("caption"),
-                idempotency_key=dispatch.idempotency_key,
-                external_reference=dispatch.external_reference,
-                requested_by_service=dispatch.requested_by_service,
+                idempotency_key=idempotency_key,
+                external_reference=external_reference,
+                requested_by_service=requested_by_service,
                 org_id=org_id,
         )
     if message_type == "template":
         template = payload.get("template", {})
         return core_messaging_client.send_template_message(
                 token=token,
-                to_phone=phone,
+                to_phone=to_phone,
                 template_name=template.get("name", ""),
                 language_code=template.get("language_code", "pt_BR"),
                 components=template.get("components", []),
-                idempotency_key=dispatch.idempotency_key,
-                external_reference=dispatch.external_reference,
-                requested_by_service=dispatch.requested_by_service,
+                idempotency_key=idempotency_key,
+                external_reference=external_reference,
+                requested_by_service=requested_by_service,
                 org_id=org_id,
         )
     return core_messaging_client.send_text_message(
         token=token,
-        to_phone=phone,
+        to_phone=to_phone,
         body=payload.get("text", {}).get("body", ""),
-        idempotency_key=dispatch.idempotency_key,
-        external_reference=dispatch.external_reference,
-        requested_by_service=dispatch.requested_by_service,
+        idempotency_key=idempotency_key,
+        external_reference=external_reference,
+        requested_by_service=requested_by_service,
         org_id=org_id,
     )
 
